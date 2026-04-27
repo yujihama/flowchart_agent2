@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+.venv/
+
+# Build output
+dist/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment / local overrides
+.env
+.env.local
+.env.*.local
+*.local
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Tooling caches
+.cache/
+.parcel-cache/
+.eslintcache
+
+# Project-specific temp / generated
+tmp_excel_probe/
+.tmp-xlsx-verify/
+graphify-out/
+
+# Claude Code project-local settings (uncomment to share with team)
+.claude/

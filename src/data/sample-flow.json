@@ -1,0 +1,1322 @@
+{
+  "schema_version": "1.0",
+  "flow_id": "complex_purchase_to_payment_flow_001",
+  "title": "購買申請から支払・事後確認までの業務フロー（複雑テスト用）",
+  "description": "React Flow + ELK のテスト用に作成した、長く複雑で条件分岐・差戻し・例外処理を含む購買業務フロー",
+
+  "lanes": [
+    {
+      "id": "L001",
+      "name": "申請部門",
+      "type": "department"
+    },
+    {
+      "id": "L002",
+      "name": "部門承認者",
+      "type": "role"
+    },
+    {
+      "id": "L003",
+      "name": "購買部",
+      "type": "department"
+    },
+    {
+      "id": "L004",
+      "name": "受入部門",
+      "type": "department"
+    },
+    {
+      "id": "L005",
+      "name": "経理部",
+      "type": "department"
+    },
+    {
+      "id": "L006",
+      "name": "購買システム",
+      "type": "system"
+    },
+    {
+      "id": "L007",
+      "name": "取引先",
+      "type": "external_party"
+    }
+  ],
+
+  "phases": [
+    {
+      "id": "PH001",
+      "name": "申請準備"
+    },
+    {
+      "id": "PH002",
+      "name": "申請・部門承認"
+    },
+    {
+      "id": "PH003",
+      "name": "購買審査"
+    },
+    {
+      "id": "PH004",
+      "name": "発注"
+    },
+    {
+      "id": "PH005",
+      "name": "受入・検収"
+    },
+    {
+      "id": "PH006",
+      "name": "請求書受付・照合"
+    },
+    {
+      "id": "PH007",
+      "name": "支払"
+    },
+    {
+      "id": "PH008",
+      "name": "事後確認・是正"
+    }
+  ],
+
+  "nodes": [
+    {
+      "id": "N001",
+      "type": "start",
+      "label": "開始",
+      "lane_id": "L001",
+      "phase_id": "PH001",
+      "description": "購買案件の開始",
+      "source_refs": ["SRC001"]
+    },
+    {
+      "id": "N002",
+      "type": "process",
+      "label": "購買要件を整理する",
+      "lane_id": "L001",
+      "phase_id": "PH001",
+      "description": "必要物品・数量・納期・予算を整理する",
+      "source_refs": ["SRC001"]
+    },
+    {
+      "id": "N003",
+      "type": "decision",
+      "label": "予算確保済みか",
+      "lane_id": "L001",
+      "phase_id": "PH001",
+      "description": "予算残高と計画との整合を確認する",
+      "source_refs": ["SRC002"]
+    },
+    {
+      "id": "N004",
+      "type": "process",
+      "label": "予算申請を行う",
+      "lane_id": "L001",
+      "phase_id": "PH001",
+      "description": "未確保の場合に追加予算または流用申請を行う",
+      "source_refs": ["SRC002"]
+    },
+    {
+      "id": "N005",
+      "type": "process",
+      "label": "購買申請を起票する",
+      "lane_id": "L001",
+      "phase_id": "PH002",
+      "description": "購買システム上に申請を登録する",
+      "source_refs": ["SRC003"]
+    },
+    {
+      "id": "N006",
+      "type": "system_process",
+      "label": "申請内容を自動チェックする",
+      "lane_id": "L006",
+      "phase_id": "PH002",
+      "description": "必須項目・マスタ・添付漏れをシステムで確認する",
+      "source_refs": ["SRC003"]
+    },
+    {
+      "id": "N007",
+      "type": "decision",
+      "label": "入力不備があるか",
+      "lane_id": "L006",
+      "phase_id": "PH002",
+      "description": "システムチェック結果に基づく分岐",
+      "source_refs": ["SRC003"]
+    },
+    {
+      "id": "N008",
+      "type": "process",
+      "label": "申請内容を修正する",
+      "lane_id": "L001",
+      "phase_id": "PH002",
+      "description": "差戻しを受けて申請者が内容を修正する",
+      "source_refs": ["SRC003"]
+    },
+    {
+      "id": "N009",
+      "type": "process",
+      "label": "部門承認を依頼する",
+      "lane_id": "L001",
+      "phase_id": "PH002",
+      "description": "承認者へワークフローで回付する",
+      "source_refs": ["SRC004"]
+    },
+    {
+      "id": "N010",
+      "type": "decision",
+      "label": "承認権限内か",
+      "lane_id": "L002",
+      "phase_id": "PH002",
+      "description": "金額・カテゴリに応じた承認権限を確認する",
+      "source_refs": ["SRC004", "SRC005"]
+    },
+    {
+      "id": "N011",
+      "type": "process",
+      "label": "上位承認者へエスカレーションする",
+      "lane_id": "L002",
+      "phase_id": "PH002",
+      "description": "権限外案件のため上位者承認へ付議する",
+      "source_refs": ["SRC005"]
+    },
+    {
+      "id": "N012",
+      "type": "decision",
+      "label": "部門承認されたか",
+      "lane_id": "L002",
+      "phase_id": "PH002",
+      "description": "承認または差戻しの判断",
+      "source_refs": ["SRC004"]
+    },
+    {
+      "id": "N013",
+      "type": "process",
+      "label": "購買部へ申請を送付する",
+      "lane_id": "L002",
+      "phase_id": "PH003",
+      "description": "部門承認済み案件を購買部へ回付する",
+      "source_refs": ["SRC006"]
+    },
+    {
+      "id": "N014",
+      "type": "process",
+      "label": "購買内容を審査する",
+      "lane_id": "L003",
+      "phase_id": "PH003",
+      "description": "購買方針、取引区分、調達条件を確認する",
+      "source_refs": ["SRC006"]
+    },
+    {
+      "id": "N015",
+      "type": "decision",
+      "label": "見積取得が必要か",
+      "lane_id": "L003",
+      "phase_id": "PH003",
+      "description": "調達金額やカテゴリにより見積取得要否を判定する",
+      "source_refs": ["SRC007"]
+    },
+    {
+      "id": "N016",
+      "type": "process",
+      "label": "複数見積を取得する",
+      "lane_id": "L003",
+      "phase_id": "PH003",
+      "description": "必要時に相見積を取得し比較する",
+      "source_refs": ["SRC007"]
+    },
+    {
+      "id": "N017",
+      "type": "decision",
+      "label": "例外購買か",
+      "lane_id": "L003",
+      "phase_id": "PH003",
+      "description": "単独見積・緊急購買・特命発注等の例外に該当するか判定する",
+      "source_refs": ["SRC008"]
+    },
+    {
+      "id": "N018",
+      "type": "process",
+      "label": "例外理由を記録し承認を取得する",
+      "lane_id": "L003",
+      "phase_id": "PH003",
+      "description": "例外購買申請書を作成し承認を取得する",
+      "source_refs": ["SRC008"]
+    },
+    {
+      "id": "N019",
+      "type": "decision",
+      "label": "取引先が既存登録済みか",
+      "lane_id": "L003",
+      "phase_id": "PH003",
+      "description": "仕入先マスタに取引先が登録済みか確認する",
+      "source_refs": ["SRC009"]
+    },
+    {
+      "id": "N020",
+      "type": "process",
+      "label": "新規取引先登録を依頼する",
+      "lane_id": "L003",
+      "phase_id": "PH003",
+      "description": "必要書類を回収して経理へ新規登録依頼する",
+      "source_refs": ["SRC009", "SRC010"]
+    },
+    {
+      "id": "N021",
+      "type": "process",
+      "label": "取引先マスタを登録する",
+      "lane_id": "L005",
+      "phase_id": "PH003",
+      "description": "経理部が審査後に仕入先マスタを登録する",
+      "source_refs": ["SRC010"]
+    },
+    {
+      "id": "N022",
+      "type": "decision",
+      "label": "発注可能状態か",
+      "lane_id": "L003",
+      "phase_id": "PH004",
+      "description": "承認、見積、取引先登録が完了しているか確認する",
+      "source_refs": ["SRC011"]
+    },
+    {
+      "id": "N023",
+      "type": "process",
+      "label": "発注書を作成する",
+      "lane_id": "L003",
+      "phase_id": "PH004",
+      "description": "購買条件を反映した発注書を作成する",
+      "source_refs": ["SRC011"]
+    },
+    {
+      "id": "N024",
+      "type": "system_process",
+      "label": "発注番号を採番し記録する",
+      "lane_id": "L006",
+      "phase_id": "PH004",
+      "description": "購買システムでPO番号を採番する",
+      "source_refs": ["SRC011"]
+    },
+    {
+      "id": "N025",
+      "type": "process",
+      "label": "発注書を送付する",
+      "lane_id": "L003",
+      "phase_id": "PH004",
+      "description": "取引先へ発注書を送付する",
+      "source_refs": ["SRC011"]
+    },
+    {
+      "id": "N026",
+      "type": "process",
+      "label": "受注確認を返送する",
+      "lane_id": "L007",
+      "phase_id": "PH004",
+      "description": "取引先が受注確認を返送する",
+      "source_refs": ["SRC012"]
+    },
+    {
+      "id": "N027",
+      "type": "decision",
+      "label": "納期変更・条件変更があるか",
+      "lane_id": "L003",
+      "phase_id": "PH004",
+      "description": "受注確認内容に差異がある場合の判定",
+      "source_refs": ["SRC012"]
+    },
+    {
+      "id": "N028",
+      "type": "process",
+      "label": "発注内容を修正し再送する",
+      "lane_id": "L003",
+      "phase_id": "PH004",
+      "description": "条件変更反映後に再発注する",
+      "source_refs": ["SRC012"]
+    },
+    {
+      "id": "N029",
+      "type": "process",
+      "label": "物品・サービスを受領する",
+      "lane_id": "L004",
+      "phase_id": "PH005",
+      "description": "受入部門が納品物を受領する",
+      "source_refs": ["SRC013"]
+    },
+    {
+      "id": "N030",
+      "type": "decision",
+      "label": "受入内容に問題がないか",
+      "lane_id": "L004",
+      "phase_id": "PH005",
+      "description": "数量・品質・納期の観点から受入確認する",
+      "source_refs": ["SRC013"]
+    },
+    {
+      "id": "N031",
+      "type": "process",
+      "label": "受入差異を連絡する",
+      "lane_id": "L004",
+      "phase_id": "PH005",
+      "description": "不足・不良・仕様差異を購買部へ連絡する",
+      "source_refs": ["SRC013"]
+    },
+    {
+      "id": "N032",
+      "type": "process",
+      "label": "取引先へ是正依頼する",
+      "lane_id": "L003",
+      "phase_id": "PH005",
+      "description": "返品、再納品、条件再調整を依頼する",
+      "source_refs": ["SRC014"]
+    },
+    {
+      "id": "N033",
+      "type": "process",
+      "label": "検収を登録する",
+      "lane_id": "L004",
+      "phase_id": "PH005",
+      "description": "検収完了としてシステム登録する",
+      "source_refs": ["SRC013"]
+    },
+    {
+      "id": "N034",
+      "type": "process",
+      "label": "請求書を受領する",
+      "lane_id": "L005",
+      "phase_id": "PH006",
+      "description": "請求書をメールまたは紙で受領する",
+      "source_refs": ["SRC015"]
+    },
+    {
+      "id": "N035",
+      "type": "decision",
+      "label": "請求書の形式要件を満たすか",
+      "lane_id": "L005",
+      "phase_id": "PH006",
+      "description": "必要記載事項・税区分・振込先等を確認する",
+      "source_refs": ["SRC015"]
+    },
+    {
+      "id": "N036",
+      "type": "process",
+      "label": "請求書差戻しを依頼する",
+      "lane_id": "L005",
+      "phase_id": "PH006",
+      "description": "不備のある請求書の修正を取引先へ依頼する",
+      "source_refs": ["SRC015"]
+    },
+    {
+      "id": "N037",
+      "type": "process",
+      "label": "発注・検収・請求書を照合する",
+      "lane_id": "L005",
+      "phase_id": "PH006",
+      "description": "三点照合を行う",
+      "source_refs": ["SRC016"]
+    },
+    {
+      "id": "N038",
+      "type": "decision",
+      "label": "照合差異があるか",
+      "lane_id": "L005",
+      "phase_id": "PH006",
+      "description": "金額差異、数量差異、未検収を判定する",
+      "source_refs": ["SRC016"]
+    },
+    {
+      "id": "N039",
+      "type": "process",
+      "label": "差異内容を調査する",
+      "lane_id": "L005",
+      "phase_id": "PH006",
+      "description": "購買部・受入部門・取引先に確認を行う",
+      "source_refs": ["SRC016"]
+    },
+    {
+      "id": "N040",
+      "type": "decision",
+      "label": "差異解消できたか",
+      "lane_id": "L005",
+      "phase_id": "PH006",
+      "description": "調査後に支払可否を判断する",
+      "source_refs": ["SRC016"]
+    },
+    {
+      "id": "N041",
+      "type": "process",
+      "label": "支払依頼データを作成する",
+      "lane_id": "L005",
+      "phase_id": "PH007",
+      "description": "支払予定日・振込先・金額を確定する",
+      "source_refs": ["SRC017"]
+    },
+    {
+      "id": "N042",
+      "type": "decision",
+      "label": "支払承認が必要か",
+      "lane_id": "L005",
+      "phase_id": "PH007",
+      "description": "支払金額や例外条件に応じて承認要否を判定する",
+      "source_refs": ["SRC017"]
+    },
+    {
+      "id": "N043",
+      "type": "process",
+      "label": "支払承認を取得する",
+      "lane_id": "L002",
+      "phase_id": "PH007",
+      "description": "必要時に支払承認を取得する",
+      "source_refs": ["SRC017"]
+    },
+    {
+      "id": "N044",
+      "type": "system_process",
+      "label": "振込データを作成する",
+      "lane_id": "L006",
+      "phase_id": "PH007",
+      "description": "銀行連携用データを生成する",
+      "source_refs": ["SRC018"]
+    },
+    {
+      "id": "N045",
+      "type": "process",
+      "label": "支払を実行する",
+      "lane_id": "L005",
+      "phase_id": "PH007",
+      "description": "銀行システムまたはFBデータで支払を実行する",
+      "source_refs": ["SRC018"]
+    },
+    {
+      "id": "N046",
+      "type": "system_process",
+      "label": "会計仕訳を記録する",
+      "lane_id": "L006",
+      "phase_id": "PH007",
+      "description": "買掛金消込および費用計上を反映する",
+      "source_refs": ["SRC019"]
+    },
+    {
+      "id": "N047",
+      "type": "process",
+      "label": "支払結果を確認する",
+      "lane_id": "L005",
+      "phase_id": "PH008",
+      "description": "振込結果、組戻し、失敗明細を確認する",
+      "source_refs": ["SRC018"]
+    },
+    {
+      "id": "N048",
+      "type": "decision",
+      "label": "支払失敗があるか",
+      "lane_id": "L005",
+      "phase_id": "PH008",
+      "description": "口座不備等による支払失敗の有無を確認する",
+      "source_refs": ["SRC018"]
+    },
+    {
+      "id": "N049",
+      "type": "process",
+      "label": "振込先情報を修正する",
+      "lane_id": "L005",
+      "phase_id": "PH008",
+      "description": "取引先確認のうえ口座情報を修正する",
+      "source_refs": ["SRC020"]
+    },
+    {
+      "id": "N050",
+      "type": "process",
+      "label": "再支払を手配する",
+      "lane_id": "L005",
+      "phase_id": "PH008",
+      "description": "修正後に再支払フローへ進める",
+      "source_refs": ["SRC020"]
+    },
+    {
+      "id": "N051",
+      "type": "process",
+      "label": "月次レビューを実施する",
+      "lane_id": "L005",
+      "phase_id": "PH008",
+      "description": "未払残高、例外購買、差異案件をレビューする",
+      "source_refs": ["SRC021"]
+    },
+    {
+      "id": "N052",
+      "type": "decision",
+      "label": "是正対応が必要か",
+      "lane_id": "L005",
+      "phase_id": "PH008",
+      "description": "レビュー結果から是正要否を判定する",
+      "source_refs": ["SRC021"]
+    },
+    {
+      "id": "N053",
+      "type": "process",
+      "label": "是正対応を依頼する",
+      "lane_id": "L003",
+      "phase_id": "PH008",
+      "description": "購買部または申請部門へ改善依頼を行う",
+      "source_refs": ["SRC021"]
+    },
+    {
+      "id": "N054",
+      "type": "end",
+      "label": "終了",
+      "lane_id": "L005",
+      "phase_id": "PH008",
+      "description": "業務フローの終了",
+      "source_refs": ["SRC021"]
+    }
+  ],
+
+  "edges": [
+    {
+      "id": "E001",
+      "from": "N001",
+      "to": "N002",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E002",
+      "from": "N002",
+      "to": "N003",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E003",
+      "from": "N003",
+      "to": "N005",
+      "label": "確保済み",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "予算が確保済みである"
+      },
+      "source_refs": ["SRC002"]
+    },
+    {
+      "id": "E004",
+      "from": "N003",
+      "to": "N004",
+      "label": "未確保",
+      "edge_type": "rollback",
+      "condition": {
+        "type": "text",
+        "text": "予算が未確保である"
+      },
+      "source_refs": ["SRC002"]
+    },
+    {
+      "id": "E005",
+      "from": "N004",
+      "to": "N005",
+      "label": "予算確保後",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E006",
+      "from": "N005",
+      "to": "N006",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E007",
+      "from": "N006",
+      "to": "N007",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E008",
+      "from": "N007",
+      "to": "N008",
+      "label": "不備あり",
+      "edge_type": "rollback",
+      "condition": {
+        "type": "text",
+        "text": "必須項目漏れまたは添付不足がある"
+      },
+      "source_refs": ["SRC003"]
+    },
+    {
+      "id": "E009",
+      "from": "N007",
+      "to": "N009",
+      "label": "問題なし",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "入力不備がない"
+      },
+      "source_refs": ["SRC003"]
+    },
+    {
+      "id": "E010",
+      "from": "N008",
+      "to": "N005",
+      "label": "再起票",
+      "edge_type": "rollback"
+    },
+    {
+      "id": "E011",
+      "from": "N009",
+      "to": "N010",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E012",
+      "from": "N010",
+      "to": "N012",
+      "label": "権限内",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "承認者の権限内である"
+      },
+      "source_refs": ["SRC005"]
+    },
+    {
+      "id": "E013",
+      "from": "N010",
+      "to": "N011",
+      "label": "権限外",
+      "edge_type": "escalation",
+      "condition": {
+        "type": "text",
+        "text": "承認者の権限を超える"
+      },
+      "source_refs": ["SRC005"]
+    },
+    {
+      "id": "E014",
+      "from": "N011",
+      "to": "N012",
+      "label": "上位承認後",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E015",
+      "from": "N012",
+      "to": "N013",
+      "label": "承認",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "部門承認された"
+      },
+      "source_refs": ["SRC004"]
+    },
+    {
+      "id": "E016",
+      "from": "N012",
+      "to": "N008",
+      "label": "差戻し",
+      "edge_type": "rollback",
+      "condition": {
+        "type": "text",
+        "text": "部門承認されなかった"
+      },
+      "source_refs": ["SRC004"]
+    },
+    {
+      "id": "E017",
+      "from": "N013",
+      "to": "N014",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E018",
+      "from": "N014",
+      "to": "N015",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E019",
+      "from": "N015",
+      "to": "N016",
+      "label": "必要",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "見積取得が必要である"
+      },
+      "source_refs": ["SRC007"]
+    },
+    {
+      "id": "E020",
+      "from": "N015",
+      "to": "N017",
+      "label": "不要",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "見積取得が不要である"
+      },
+      "source_refs": ["SRC007"]
+    },
+    {
+      "id": "E021",
+      "from": "N016",
+      "to": "N017",
+      "label": "取得後",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E022",
+      "from": "N017",
+      "to": "N018",
+      "label": "例外購買",
+      "edge_type": "exception",
+      "condition": {
+        "type": "text",
+        "text": "単独見積または緊急購買等の例外に該当する"
+      },
+      "source_refs": ["SRC008"]
+    },
+    {
+      "id": "E023",
+      "from": "N017",
+      "to": "N019",
+      "label": "通常購買",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "例外購買ではない"
+      },
+      "source_refs": ["SRC008"]
+    },
+    {
+      "id": "E024",
+      "from": "N018",
+      "to": "N019",
+      "label": "承認後",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E025",
+      "from": "N019",
+      "to": "N022",
+      "label": "登録済み",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "取引先が既に登録済みである"
+      },
+      "source_refs": ["SRC009"]
+    },
+    {
+      "id": "E026",
+      "from": "N019",
+      "to": "N020",
+      "label": "未登録",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "取引先が未登録である"
+      },
+      "source_refs": ["SRC009"]
+    },
+    {
+      "id": "E027",
+      "from": "N020",
+      "to": "N021",
+      "label": "登録依頼",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E028",
+      "from": "N021",
+      "to": "N022",
+      "label": "登録完了",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E029",
+      "from": "N022",
+      "to": "N023",
+      "label": "可能",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "発注に必要な前提条件が整っている"
+      },
+      "source_refs": ["SRC011"]
+    },
+    {
+      "id": "E030",
+      "from": "N022",
+      "to": "N014",
+      "label": "不可",
+      "edge_type": "rollback",
+      "condition": {
+        "type": "text",
+        "text": "前提条件が不足している"
+      },
+      "source_refs": ["SRC011"]
+    },
+    {
+      "id": "E031",
+      "from": "N023",
+      "to": "N024",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E032",
+      "from": "N024",
+      "to": "N025",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E033",
+      "from": "N025",
+      "to": "N026",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E034",
+      "from": "N026",
+      "to": "N027",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E035",
+      "from": "N027",
+      "to": "N028",
+      "label": "変更あり",
+      "edge_type": "rollback",
+      "condition": {
+        "type": "text",
+        "text": "納期または条件変更がある"
+      },
+      "source_refs": ["SRC012"]
+    },
+    {
+      "id": "E036",
+      "from": "N027",
+      "to": "N029",
+      "label": "変更なし",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "変更がない"
+      },
+      "source_refs": ["SRC012"]
+    },
+    {
+      "id": "E037",
+      "from": "N028",
+      "to": "N024",
+      "label": "再採番・再送",
+      "edge_type": "rollback"
+    },
+    {
+      "id": "E038",
+      "from": "N029",
+      "to": "N030",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E039",
+      "from": "N030",
+      "to": "N033",
+      "label": "問題なし",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "受入内容に問題がない"
+      },
+      "source_refs": ["SRC013"]
+    },
+    {
+      "id": "E040",
+      "from": "N030",
+      "to": "N031",
+      "label": "問題あり",
+      "edge_type": "exception",
+      "condition": {
+        "type": "text",
+        "text": "数量差異、不良、仕様差異等がある"
+      },
+      "source_refs": ["SRC013"]
+    },
+    {
+      "id": "E041",
+      "from": "N031",
+      "to": "N032",
+      "label": "是正依頼",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E042",
+      "from": "N032",
+      "to": "N029",
+      "label": "再受領待ち",
+      "edge_type": "rollback"
+    },
+    {
+      "id": "E043",
+      "from": "N033",
+      "to": "N034",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E044",
+      "from": "N034",
+      "to": "N035",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E045",
+      "from": "N035",
+      "to": "N037",
+      "label": "適正",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "請求書が形式要件を満たす"
+      },
+      "source_refs": ["SRC015"]
+    },
+    {
+      "id": "E046",
+      "from": "N035",
+      "to": "N036",
+      "label": "不備あり",
+      "edge_type": "rollback",
+      "condition": {
+        "type": "text",
+        "text": "請求書に不備がある"
+      },
+      "source_refs": ["SRC015"]
+    },
+    {
+      "id": "E047",
+      "from": "N036",
+      "to": "N034",
+      "label": "再受領",
+      "edge_type": "rollback"
+    },
+    {
+      "id": "E048",
+      "from": "N037",
+      "to": "N038",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E049",
+      "from": "N038",
+      "to": "N041",
+      "label": "差異なし",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "三点照合の差異がない"
+      },
+      "source_refs": ["SRC016"]
+    },
+    {
+      "id": "E050",
+      "from": "N038",
+      "to": "N039",
+      "label": "差異あり",
+      "edge_type": "exception",
+      "condition": {
+        "type": "text",
+        "text": "金額、数量、検収状況に差異がある"
+      },
+      "source_refs": ["SRC016"]
+    },
+    {
+      "id": "E051",
+      "from": "N039",
+      "to": "N040",
+      "label": "調査後",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E052",
+      "from": "N040",
+      "to": "N041",
+      "label": "解消済み",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "差異が解消された"
+      },
+      "source_refs": ["SRC016"]
+    },
+    {
+      "id": "E053",
+      "from": "N040",
+      "to": "N031",
+      "label": "受入再確認",
+      "edge_type": "rollback",
+      "condition": {
+        "type": "text",
+        "text": "受入または検収の見直しが必要である"
+      },
+      "source_refs": ["SRC016"]
+    },
+    {
+      "id": "E054",
+      "from": "N041",
+      "to": "N042",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E055",
+      "from": "N042",
+      "to": "N043",
+      "label": "必要",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "支払承認が必要である"
+      },
+      "source_refs": ["SRC017"]
+    },
+    {
+      "id": "E056",
+      "from": "N042",
+      "to": "N044",
+      "label": "不要",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "支払承認が不要である"
+      },
+      "source_refs": ["SRC017"]
+    },
+    {
+      "id": "E057",
+      "from": "N043",
+      "to": "N044",
+      "label": "承認後",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E058",
+      "from": "N044",
+      "to": "N045",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E059",
+      "from": "N045",
+      "to": "N046",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E060",
+      "from": "N046",
+      "to": "N047",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E061",
+      "from": "N047",
+      "to": "N048",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E062",
+      "from": "N048",
+      "to": "N049",
+      "label": "失敗あり",
+      "edge_type": "exception",
+      "condition": {
+        "type": "text",
+        "text": "支払失敗または組戻しがある"
+      },
+      "source_refs": ["SRC018", "SRC020"]
+    },
+    {
+      "id": "E063",
+      "from": "N048",
+      "to": "N051",
+      "label": "失敗なし",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "支払失敗がない"
+      },
+      "source_refs": ["SRC018"]
+    },
+    {
+      "id": "E064",
+      "from": "N049",
+      "to": "N050",
+      "label": "修正後",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E065",
+      "from": "N050",
+      "to": "N044",
+      "label": "再支払",
+      "edge_type": "rollback"
+    },
+    {
+      "id": "E066",
+      "from": "N051",
+      "to": "N052",
+      "edge_type": "normal"
+    },
+    {
+      "id": "E067",
+      "from": "N052",
+      "to": "N053",
+      "label": "必要",
+      "edge_type": "exception",
+      "condition": {
+        "type": "text",
+        "text": "是正対応が必要である"
+      },
+      "source_refs": ["SRC021"]
+    },
+    {
+      "id": "E068",
+      "from": "N052",
+      "to": "N054",
+      "label": "不要",
+      "edge_type": "normal",
+      "condition": {
+        "type": "text",
+        "text": "是正対応が不要である"
+      },
+      "source_refs": ["SRC021"]
+    },
+    {
+      "id": "E069",
+      "from": "N053",
+      "to": "N054",
+      "label": "是正依頼後",
+      "edge_type": "normal"
+    }
+  ],
+
+  "sources": [
+    {
+      "id": "SRC001",
+      "file_name": "購買業務手順書.pdf",
+      "page": 2,
+      "section": "1. 業務開始"
+    },
+    {
+      "id": "SRC002",
+      "file_name": "予算管理規程.pdf",
+      "page": 5,
+      "section": "3. 予算確認"
+    },
+    {
+      "id": "SRC003",
+      "file_name": "購買システム操作手順書.pdf",
+      "page": 8,
+      "section": "2. 申請起票"
+    },
+    {
+      "id": "SRC004",
+      "file_name": "承認フロー規程.pdf",
+      "page": 3,
+      "section": "2. 部門承認"
+    },
+    {
+      "id": "SRC005",
+      "file_name": "承認権限規程.pdf",
+      "page": 6,
+      "section": "4. 承認権限"
+    },
+    {
+      "id": "SRC006",
+      "file_name": "購買審査基準書.pdf",
+      "page": 4,
+      "section": "1. 購買審査"
+    },
+    {
+      "id": "SRC007",
+      "file_name": "見積取得ルール.pdf",
+      "page": 2,
+      "section": "2. 見積取得要件"
+    },
+    {
+      "id": "SRC008",
+      "file_name": "例外購買取扱基準.pdf",
+      "page": 3,
+      "section": "1. 例外購買"
+    },
+    {
+      "id": "SRC009",
+      "file_name": "取引先管理規程.pdf",
+      "page": 5,
+      "section": "3. 登録済取引先確認"
+    },
+    {
+      "id": "SRC010",
+      "file_name": "仕入先マスタ登録手順書.pdf",
+      "page": 4,
+      "section": "2. 新規登録"
+    },
+    {
+      "id": "SRC011",
+      "file_name": "発注管理手順書.pdf",
+      "page": 7,
+      "section": "3. 発注"
+    },
+    {
+      "id": "SRC012",
+      "file_name": "取引先受注確認ルール.pdf",
+      "page": 2,
+      "section": "1. 受注確認"
+    },
+    {
+      "id": "SRC013",
+      "file_name": "受入検収手順書.pdf",
+      "page": 5,
+      "section": "2. 受入・検収"
+    },
+    {
+      "id": "SRC014",
+      "file_name": "不良品・差異対応手順書.pdf",
+      "page": 3,
+      "section": "1. 是正対応"
+    },
+    {
+      "id": "SRC015",
+      "file_name": "請求書受付基準.pdf",
+      "page": 4,
+      "section": "2. 請求書確認"
+    },
+    {
+      "id": "SRC016",
+      "file_name": "三点照合手順書.pdf",
+      "page": 6,
+      "section": "3. 照合"
+    },
+    {
+      "id": "SRC017",
+      "file_name": "支払依頼承認規程.pdf",
+      "page": 5,
+      "section": "2. 支払承認"
+    },
+    {
+      "id": "SRC018",
+      "file_name": "支払実行手順書.pdf",
+      "page": 7,
+      "section": "4. 支払実行"
+    },
+    {
+      "id": "SRC019",
+      "file_name": "会計仕訳連携仕様書.pdf",
+      "page": 3,
+      "section": "1. 仕訳生成"
+    },
+    {
+      "id": "SRC020",
+      "file_name": "振込先変更管理手順書.pdf",
+      "page": 2,
+      "section": "1. 口座修正"
+    },
+    {
+      "id": "SRC021",
+      "file_name": "月次購買レビュー手順書.pdf",
+      "page": 8,
+      "section": "5. 事後確認"
+    }
+  ]
+}
