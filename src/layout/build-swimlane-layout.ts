@@ -70,8 +70,8 @@ export function buildSwimlaneLayout(model: FlowModel): SwimlaneLayout {
   const laneById = new Map(model.lanes.map((lane) => [lane.id, lane]));
   const phaseById = new Map(model.phases.map((phase) => [phase.id, phase]));
   const laneIndexById = new Map(model.lanes.map((lane, index) => [lane.id, index]));
-  const depthByNodeId = calculateDepths(model);
-  const { rowByNodeId, reservedRowsByLane } = assignRows(model, depthByNodeId);
+  const { depthByNodeId, backEdgeIds } = calculateDepths(model);
+  const { rowByNodeId, reservedRowsByLane } = assignRows(model, depthByNodeId, backEdgeIds);
   const reservedRows = Array.from(reservedRowsByLane.values()).flatMap((rows) => Array.from(rows));
   const maxRow = Math.max(0, ...Array.from(rowByNodeId.values()), ...reservedRows);
   const laneHeight = LANE_HEADER_HEIGHT + NODE_TOP_PADDING + maxRow * ROW_HEIGHT + BOARD_PADDING_BOTTOM;
@@ -221,17 +221,15 @@ export function buildSwimlaneLayout(model: FlowModel): SwimlaneLayout {
 }
 
 function calculateDepths(model: FlowModel) {
-  const indexByNodeId = new Map(model.nodes.map((node, index) => [node.id, index]));
+  const backEdgeIds = findBackEdgeIds(model);
   const depthByNodeId = new Map(model.nodes.map((node) => [node.id, 0]));
+  const forwardEdges = model.edges.filter(
+    (edge) => !backEdgeIds.has(edge.id) && depthByNodeId.has(edge.from) && depthByNodeId.has(edge.to),
+  );
 
   for (let pass = 0; pass < model.nodes.length; pass += 1) {
     let changed = false;
-    model.edges.forEach((edge) => {
-      const sourceIndex = indexByNodeId.get(edge.from) ?? 0;
-      const targetIndex = indexByNodeId.get(edge.to) ?? 0;
-      const isBackReference = edge.edge_type === "rollback" && targetIndex <= sourceIndex;
-      if (isBackReference) return;
-
+    forwardEdges.forEach((edge) => {
       const sourceDepth = depthByNodeId.get(edge.from) ?? 0;
       const targetDepth = depthByNodeId.get(edge.to) ?? 0;
       if (sourceDepth + 1 > targetDepth) {
@@ -242,10 +240,61 @@ function calculateDepths(model: FlowModel) {
     if (!changed) break;
   }
 
-  return depthByNodeId;
+  return { depthByNodeId, backEdgeIds };
 }
 
-function assignRows(model: FlowModel, depthByNodeId: Map<string, number>) {
+function findBackEdgeIds(model: FlowModel) {
+  const indexByNodeId = new Map(model.nodes.map((node, index) => [node.id, index]));
+  const outgoingByNodeId = new Map<string, FlowEdge[]>();
+  const backEdgeIds = new Set<string>();
+
+  model.edges.forEach((edge) => {
+    const sourceIndex = indexByNodeId.get(edge.from);
+    const targetIndex = indexByNodeId.get(edge.to);
+    if (sourceIndex === undefined || targetIndex === undefined) return;
+    if (edge.from === edge.to || (edge.edge_type === "rollback" && targetIndex <= sourceIndex)) {
+      backEdgeIds.add(edge.id);
+      return;
+    }
+    const outgoing = outgoingByNodeId.get(edge.from) ?? [];
+    outgoing.push(edge);
+    outgoingByNodeId.set(edge.from, outgoing);
+  });
+
+  const state = new Map<string, "visiting" | "done">();
+  const visit = (rootId: string) => {
+    const stack: Array<{ nodeId: string; edgeIndex: number }> = [{ nodeId: rootId, edgeIndex: 0 }];
+    state.set(rootId, "visiting");
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      const outgoing = outgoingByNodeId.get(frame.nodeId) ?? [];
+      if (frame.edgeIndex >= outgoing.length) {
+        state.set(frame.nodeId, "done");
+        stack.pop();
+        continue;
+      }
+      const edge = outgoing[frame.edgeIndex];
+      frame.edgeIndex += 1;
+      if (backEdgeIds.has(edge.id)) continue;
+      const targetState = state.get(edge.to);
+      if (targetState === "visiting") {
+        backEdgeIds.add(edge.id);
+      } else if (targetState === undefined) {
+        state.set(edge.to, "visiting");
+        stack.push({ nodeId: edge.to, edgeIndex: 0 });
+      }
+    }
+  };
+
+  const roots = [...model.nodes.filter((node) => node.type === "start"), ...model.nodes];
+  roots.forEach((node) => {
+    if (!state.has(node.id)) visit(node.id);
+  });
+
+  return backEdgeIds;
+}
+
+function assignRows(model: FlowModel, depthByNodeId: Map<string, number>, backEdgeIds: Set<string>) {
   const occupiedRowsByLane = new Map<string, Set<number>>();
   const reservedRowsByLane = new Map<string, Set<number>>();
   const rowByNodeId = new Map<string, number>();
@@ -255,6 +304,7 @@ function assignRows(model: FlowModel, depthByNodeId: Map<string, number>) {
 
   model.edges.forEach((edge) => {
     if (edge.edge_type && edge.edge_type !== "normal") return;
+    if (backEdgeIds.has(edge.id)) return;
     const incoming = incomingNormalEdgesByTargetId.get(edge.to) ?? [];
     incoming.push(edge);
     incomingNormalEdgesByTargetId.set(edge.to, incoming);

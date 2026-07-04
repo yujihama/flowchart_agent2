@@ -51,26 +51,35 @@ type PreparedExport = {
   url: string;
 };
 
+type LayoutResult = {
+  nodes: Array<Node<FlowNodeData | LaneNodeData>>;
+  edges: Edge<FlowEdgeData>[];
+  failed: boolean;
+};
+
 export function FlowCanvas({ model }: { model: FlowModel }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<FlowNodeData | LaneNodeData>>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge<FlowEdgeData>>([]);
   const [selection, setSelection] = useState<Selection>(null);
-  const [layoutState, setLayoutState] = useState<"idle" | "running" | "failed">("idle");
   const [exportState, setExportState] = useState<"preparing" | "ready" | "failed">("preparing");
   const [preparedExports, setPreparedExports] = useState<PreparedExport[]>([]);
 
-  useEffect(() => {
-    setLayoutState("running");
+  const layout = useMemo<LayoutResult>(() => {
     try {
       const mapped = buildSwimlaneLayout(model);
-      setNodes(mapped.nodes);
-      setEdges(mapped.edges);
-      setSelection(null);
-      setLayoutState("idle");
-    } catch {
-      setLayoutState("failed");
+      return { nodes: mapped.nodes, edges: mapped.edges, failed: false };
+    } catch (error) {
+      console.error("Swimlane layout failed", error);
+      return { nodes: [], edges: [], failed: true };
     }
-  }, [model, setEdges, setNodes]);
+  }, [model]);
+  const layoutState = layout.failed ? "failed" : "idle";
+
+  useEffect(() => {
+    setNodes(layout.nodes);
+    setEdges(layout.edges);
+    setSelection(null);
+  }, [layout, setEdges, setNodes]);
 
   const minimapNodeColor = useCallback((node: Node<FlowNodeData | LaneNodeData>) => {
     if (node.data.kind === "lane") return "#e6edf2";
@@ -92,7 +101,7 @@ export function FlowCanvas({ model }: { model: FlowModel }) {
     const createdUrls: string[] = [];
 
     setPreparedExports([]);
-    if (layoutState !== "idle" || nodes.length === 0) {
+    if (layout.failed || layout.nodes.length === 0) {
       setExportState("preparing");
       return () => {
         createdUrls.forEach((url) => URL.revokeObjectURL(url));
@@ -102,7 +111,7 @@ export function FlowCanvas({ model }: { model: FlowModel }) {
     setExportState("preparing");
     Promise.all(
       FLOW_EXPORT_FORMATS.map(async (format) => {
-        const blob = await createFlowExportBlob(format.id, { model, nodes, edges });
+        const blob = await createFlowExportBlob(format.id, { model, nodes: layout.nodes, edges: layout.edges });
         const url = URL.createObjectURL(blob);
         createdUrls.push(url);
         if (canceled) {
@@ -136,7 +145,7 @@ export function FlowCanvas({ model }: { model: FlowModel }) {
       canceled = true;
       createdUrls.forEach((url) => URL.revokeObjectURL(url));
     };
-  }, [edges, layoutState, model, nodes]);
+  }, [layout, model]);
 
   const getPreparedExport = useCallback(
     (formatId: FlowExportFormatId) => preparedExports.find((item) => item.formatId === formatId),
@@ -171,7 +180,7 @@ export function FlowCanvas({ model }: { model: FlowModel }) {
               <span>{model.flow_id}</span>
               <span>{canvasMeta}</span>
               <span className={`layout-pill layout-pill--${layoutState}`}>
-                {layoutState === "running" ? "swimlane layout" : layoutState === "failed" ? "layout failed" : "ready"}
+                {layoutState === "failed" ? "layout failed" : "ready"}
               </span>
             </div>
             <div className="download-actions" aria-label="フロー図の出力">
@@ -213,6 +222,9 @@ export function FlowCanvas({ model }: { model: FlowModel }) {
               onPaneClick={() => setSelection(null)}
               fitView
               fitViewOptions={{ padding: 0.2 }}
+              minZoom={0.05}
+              nodesDraggable={false}
+              nodesConnectable={false}
               proOptions={{ hideAttribution: true }}
             >
               <Background gap={22} size={1} color="#d5dee4" />

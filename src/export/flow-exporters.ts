@@ -1,7 +1,13 @@
 import type { Edge, Node } from "@xyflow/react";
 import type { FlowModel } from "../domain/flow-model";
 import type { FlowEdgeData, FlowNodeData, LaneNodeData } from "../layout/flow-reactflow-types";
-import { LANE_PALETTE, LANE_WIDTH, NODE_HEIGHT_BY_TYPE, NODE_WIDTH_BY_TYPE } from "../layout/swimlane-constants";
+import {
+  LANE_HEADER_HEIGHT,
+  LANE_PALETTE,
+  LANE_WIDTH,
+  NODE_HEIGHT_BY_TYPE,
+  NODE_WIDTH_BY_TYPE,
+} from "../layout/swimlane-constants";
 
 type ExportNode = Node<FlowNodeData | LaneNodeData>;
 type ExportEdge = Edge<FlowEdgeData>;
@@ -93,8 +99,8 @@ function renderLane(node: Node<LaneNodeData>) {
 
   return [
     `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${color.fill}" stroke="#c8d4dc"/>`,
-    `<rect x="${x}" y="${y}" width="${width}" height="62" fill="${color.header}" stroke="#c8d4dc"/>`,
-    `<rect x="${x}" y="${y}" width="5" height="62" fill="${color.accent}"/>`,
+    `<rect x="${x}" y="${y}" width="${width}" height="${LANE_HEADER_HEIGHT}" fill="${color.header}" stroke="#c8d4dc"/>`,
+    `<rect x="${x}" y="${y}" width="5" height="${LANE_HEADER_HEIGHT}" fill="${color.accent}"/>`,
     `<rect x="${x + 16}" y="${y + 19}" width="40" height="24" rx="12" fill="${color.chip}"/>`,
     `<text x="${x + 36}" y="${y + 35}" text-anchor="middle" dominant-baseline="central" fill="${color.accent}" font-family="${fontFamily()}" font-size="10" font-weight="800">${escapeXml(lane.id)}</text>`,
     `<text x="${x + 64}" y="${y + 26}" fill="#22313f" font-family="${fontFamily()}" font-size="14" font-weight="800">${escapeXml(lane.name)}</text>`,
@@ -166,11 +172,20 @@ function getExportBounds(nodes: ExportNode[], edges: ExportEdge[]) {
     ];
   });
   const edgeBounds = edges.flatMap((edge) => edge.data?.routePath ?? []);
-  const points = [...nodeBounds, ...edgeBounds];
-  const minX = Math.min(...points.map((point) => point.x), 0);
-  const minY = Math.min(...points.map((point) => point.y), 0);
-  const maxX = Math.max(...points.map((point) => point.x), 900);
-  const maxY = Math.max(...points.map((point) => point.y), 600);
+  let minX = 0;
+  let minY = 0;
+  let maxX = 900;
+  let maxY = 600;
+  for (const point of [...nodeBounds, ...edgeBounds]) {
+    if (Number.isFinite(point.x)) {
+      minX = Math.min(minX, point.x);
+      maxX = Math.max(maxX, point.x);
+    }
+    if (Number.isFinite(point.y)) {
+      minY = Math.min(minY, point.y);
+      maxY = Math.max(maxY, point.y);
+    }
+  }
   const padding = 36;
 
   return {
@@ -185,15 +200,21 @@ function marker(id: string, color: string) {
   return `<marker id="${id}" markerWidth="12" markerHeight="12" viewBox="0 0 12 12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M 2 2 L 10 6 L 2 10 z" fill="${color}"/></marker>`;
 }
 
+const PNG_EXPORT_SCALE = 2;
+const PNG_EXPORT_MAX_PIXELS = 64_000_000;
+
 function svgToPngBlob(svg: string): Promise<Blob> {
   return new Promise((resolve, reject) => {
     const svgBlob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
     const url = URL.createObjectURL(svgBlob);
     const image = new Image();
     image.onload = () => {
+      const width = Math.max(image.naturalWidth, 1);
+      const height = Math.max(image.naturalHeight, 1);
+      const scale = Math.min(PNG_EXPORT_SCALE, Math.sqrt(PNG_EXPORT_MAX_PIXELS / (width * height)));
       const canvas = document.createElement("canvas");
-      canvas.width = image.naturalWidth;
-      canvas.height = image.naturalHeight;
+      canvas.width = Math.max(1, Math.round(width * scale));
+      canvas.height = Math.max(1, Math.round(height * scale));
       const context = canvas.getContext("2d");
       if (!context) {
         URL.revokeObjectURL(url);
@@ -202,7 +223,7 @@ function svgToPngBlob(svg: string): Promise<Blob> {
       }
       context.fillStyle = "#eef2f5";
       context.fillRect(0, 0, canvas.width, canvas.height);
-      context.drawImage(image, 0, 0);
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
       canvas.toBlob((blob) => {
         URL.revokeObjectURL(url);
         if (blob) {
@@ -377,7 +398,9 @@ function renderExcelDrawing({ nodes, edges }: FlowExportContext) {
     const w = diagramSize(width);
     const h = diagramSize(height);
     items.push(shapeXml(nextId(), `lane-${lane.id}`, "rect", x, y, w, h, color.fill, "#c8d4dc"));
-    items.push(shapeXml(nextId(), `lane-header-${lane.id}`, "rect", x, y, w, diagramSize(62), color.header, "#c8d4dc"));
+    items.push(
+      shapeXml(nextId(), `lane-header-${lane.id}`, "rect", x, y, w, diagramSize(LANE_HEADER_HEIGHT), color.header, "#c8d4dc"),
+    );
     items.push(
       shapeXml(
         nextId(),
@@ -445,7 +468,8 @@ function renderExcelDrawing({ nodes, edges }: FlowExportContext) {
   edges.forEach((edge) => {
     const data = edge.data;
     if (!data?.routePath?.length) return;
-    const color = edgeColor(data.edge.edge_type);
+    const edgeType = data.edge.edge_type;
+    const color = edgeColor(edgeType);
     const points = orthogonalizePoints(data.routePath);
     items.push(
       connectorXml(
@@ -453,22 +477,22 @@ function renderExcelDrawing({ nodes, edges }: FlowExportContext) {
         `edge-${edge.id}`,
         points,
         color,
-        data.edge.edge_type === "rollback",
-        nodeShapeIdByNodeId.get(edge.source),
-        nodeShapeIdByNodeId.get(edge.target),
+        edgeType === "rollback",
+        edgeType === "rollback" || edgeType === "exception" ? 24765 : 19050,
       ),
     );
     const label = edge.label ? String(edge.label) : "";
     if (label) {
       const labelPoint = data.labelPoint ?? segmentMidpoint(points);
+      const labelWidth = Math.min(200, Math.max(36, estimateTextWidth(label, 9) + 14));
       items.push(
         shapeXml(
           nextId(),
           `edge-label-${edge.id}`,
           "roundRect",
-          diagramX(labelPoint.x) - diagramSize(44),
+          diagramX(labelPoint.x) - diagramSize(labelWidth / 2),
           diagramY(labelPoint.y) - diagramSize(11),
-          diagramSize(88),
+          diagramSize(labelWidth),
           diagramSize(22),
           "#ffffff",
           "#ffffff",
@@ -521,8 +545,7 @@ function connectorXml(
   routePoints: Array<{ x: number; y: number }>,
   color: string,
   dashed: boolean,
-  _sourceShapeId?: number,
-  _targetShapeId?: number,
+  lineWidthEmu = 19050,
 ) {
   const points = routePoints.map((point) => ({ x: diagramX(point.x), y: diagramY(point.y) }));
   const minX = Math.min(...points.map((point) => point.x));
@@ -540,9 +563,19 @@ function connectorXml(
   return [
     `${twoCellAnchorOpen(minX, minY, width, height)}`,
     `<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="${id}" name="${escapeXml(name)}"/><xdr:cNvSpPr/></xdr:nvSpPr>`,
-    `<xdr:spPr><a:xfrm><a:off x="${minX}" y="${minY}"/><a:ext cx="${width}" cy="${height}"/></a:xfrm><a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="${width}" b="${height}"/><a:pathLst><a:path w="${width}" h="${height}"><a:moveTo><a:pt x="${firstPoint?.x ?? 0}" y="${firstPoint?.y ?? 0}"/></a:moveTo>${linePoints.map((point) => `<a:lnTo><a:pt x="${point.x}" y="${point.y}"/></a:lnTo>`).join("")}</a:path></a:pathLst></a:custGeom><a:noFill/><a:ln w="19050"><a:solidFill><a:srgbClr val="${hex(color)}"/></a:solidFill>${dashed ? '<a:prstDash val="dash"/>' : ""}<a:tailEnd type="arrow"/></a:ln></xdr:spPr>`,
+    `<xdr:spPr><a:xfrm><a:off x="${minX}" y="${minY}"/><a:ext cx="${width}" cy="${height}"/></a:xfrm><a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="${width}" b="${height}"/><a:pathLst><a:path w="${width}" h="${height}"><a:moveTo><a:pt x="${firstPoint?.x ?? 0}" y="${firstPoint?.y ?? 0}"/></a:moveTo>${linePoints.map((point) => `<a:lnTo><a:pt x="${point.x}" y="${point.y}"/></a:lnTo>`).join("")}</a:path></a:pathLst></a:custGeom><a:noFill/><a:ln w="${lineWidthEmu}"><a:solidFill><a:srgbClr val="${hex(color)}"/></a:solidFill>${dashed ? '<a:prstDash val="dash"/>' : ""}<a:tailEnd type="arrow"/></a:ln></xdr:spPr>`,
     "</xdr:sp><xdr:clientData/></xdr:twoCellAnchor>",
   ].join("");
+}
+
+function estimateTextWidth(text: string, fontSizePt: number) {
+  const pxPerPoint = 4 / 3;
+  let units = 0;
+  for (const char of text) {
+    // Full-width characters (CJK, kana, full-width forms) take ~1em, others ~0.55em.
+    units += /[ᄀ-￦]/.test(char) ? 1 : 0.55;
+  }
+  return units * fontSizePt * pxPerPoint;
 }
 
 const ANCHOR_COL_WIDTH_EMU = 72 * 9525;
@@ -551,7 +584,7 @@ const ANCHOR_ROW_HEIGHT_EMU = 24 * 9525;
 function twoCellAnchorOpen(x: number, y: number, width: number, height: number) {
   const from = cellAnchorPoint(x, y);
   const to = cellAnchorPoint(x + Math.max(width, 1), y + Math.max(height, 1));
-  return `<xdr:twoCellAnchor><xdr:from><xdr:col>${from.col}</xdr:col><xdr:colOff>${from.colOff}</xdr:colOff><xdr:row>${from.row}</xdr:row><xdr:rowOff>${from.rowOff}</xdr:rowOff></xdr:from><xdr:to><xdr:col>${to.col}</xdr:col><xdr:colOff>${to.colOff}</xdr:colOff><xdr:row>${to.row}</xdr:row><xdr:rowOff>${to.rowOff}</xdr:rowOff></xdr:to>`;
+  return `<xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>${from.col}</xdr:col><xdr:colOff>${from.colOff}</xdr:colOff><xdr:row>${from.row}</xdr:row><xdr:rowOff>${from.rowOff}</xdr:rowOff></xdr:from><xdr:to><xdr:col>${to.col}</xdr:col><xdr:colOff>${to.colOff}</xdr:colOff><xdr:row>${to.row}</xdr:row><xdr:rowOff>${to.rowOff}</xdr:rowOff></xdr:to>`;
 }
 
 function cellAnchorPoint(x: number, y: number) {
@@ -669,11 +702,13 @@ function worksheetXml(sheet: SheetSpec, sheetIndex: number) {
   const drawing = sheet.drawingXml ? '<drawing r:id="rId1"/>' : "";
   const autoFilter = sheet.autoFilter === false ? "" : `<autoFilter ref="${refs}"/>`;
 
+  const pane = sheet.drawingXml ? "" : '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>';
+
   return [
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
     '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
     `<dimension ref="${refs}"/>`,
-    `<sheetViews><sheetView workbookViewId="0"${sheet.drawingXml ? ' showGridLines="0"' : ""}><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>`,
+    `<sheetViews><sheetView workbookViewId="0"${sheet.drawingXml ? ' showGridLines="0"' : ""}>${pane}</sheetView></sheetViews>`,
     "<cols>",
     ...widths.map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`),
     "</cols>",

@@ -16,11 +16,11 @@ Python用の仮想環境は `.venv` に作成します。現時点の実装は�
 ## 主要機能
 
 - `lanes / phases / nodes / edges / sources` を持つJSON正本の型定義
-- 必須項目、ID重複、参照整合性、表示品質のバリデーション
+- 必須項目、ID重複、参照整合性、条件式、自己ループ、表示品質のバリデーション
 - `decision` ノードと `edge.condition` による条件分岐表現
-- レーンを横列、業務ステップを縦方向に配置するスイムレーン派生レイアウト
-- UI上で「ルール」レイアウトと「ELK」レイアウトを切り替え
+- レーンを横列、業務ステップを縦方向に配置するスイムレーン派生レイアウト(サイクルを含むグラフでも安定動作)
 - React Flowによるノード/エッジ表示、選択、詳細パネル表示
+- PNG / SVG / XLSX(図形オブジェクト付き)エクスポート
 - 編集用JSONテキストエリアとサンプルフロー
 
 ## ディレクトリ
@@ -33,13 +33,14 @@ src/
   parsers/
     json-schema.ts
   layout/
-    build-elk-swimlane-layout.ts
     build-swimlane-layout.ts
-    build-elk-graph.ts
-    run-elk-layout.ts
-    map-elk-to-reactflow.ts
+    swimlane-constants.ts
+    flow-reactflow-types.ts
+  export/
+    flow-exporters.ts
   ui/
     FlowCanvas.tsx
+    edges/
     nodes/
     panels/
   data/
