@@ -1,7 +1,7 @@
 import type { Edge, Node } from "@xyflow/react";
 import { MarkerType } from "@xyflow/react";
 import type { FlowEdge, FlowModel, FlowNode, Lane } from "../domain/flow-model";
-import type { FlowEdgeData, FlowNodeData, LaneNodeData } from "./flow-reactflow-types";
+import type { FlowEdgeData, FlowNodeData, LaneNodeData, PhaseBandData } from "./flow-reactflow-types";
 import {
   BOARD_PADDING_BOTTOM,
   HANDLE_SLOT_COUNT,
@@ -14,7 +14,7 @@ import {
 } from "./swimlane-constants";
 
 export type SwimlaneLayout = {
-  nodes: Array<Node<FlowNodeData | LaneNodeData>>;
+  nodes: Array<Node<FlowNodeData | LaneNodeData | PhaseBandData>>;
   edges: Edge<FlowEdgeData>[];
 };
 
@@ -55,6 +55,7 @@ type EndpointVerticalSegmentRef = VerticalSegmentRef & {
 };
 
 const LANE_GUTTER_OFFSET = 64;
+const PHASE_BOUNDARY_OFFSET = 28;
 const ROW_GUTTER_OFFSET = 18;
 const DECISION_BRANCH_TRACK_GAP = 18;
 const DECISION_BRANCH_STEM_LENGTH = 32;
@@ -94,6 +95,8 @@ export function buildSwimlaneLayout(model: FlowModel): SwimlaneLayout {
     selectable: false,
     focusable: false,
     zIndex: -10,
+    width: LANE_WIDTH,
+    height: laneHeight,
     style: {
       width: LANE_WIDTH,
       height: laneHeight,
@@ -132,6 +135,8 @@ export function buildSwimlaneLayout(model: FlowModel): SwimlaneLayout {
         laneName: laneById.get(flowNode.lane_id)?.name ?? flowNode.lane_id,
         phaseName: phaseById.get(flowNode.phase_id)?.name ?? flowNode.phase_id,
       },
+      width: nodeWidth,
+      height: nodeHeight,
       zIndex: 10,
     };
   });
@@ -217,7 +222,69 @@ export function buildSwimlaneLayout(model: FlowModel): SwimlaneLayout {
     };
   });
 
-  return { nodes: [...laneNodes, ...flowNodes], edges: resolveSegmentOverlaps(edges) };
+  const phaseBandNodes = buildPhaseBandNodes(model, rowByNodeId, laneHeight);
+
+  return { nodes: [...laneNodes, ...phaseBandNodes, ...flowNodes], edges: resolveSegmentOverlaps(edges) };
+}
+
+function buildPhaseBandNodes(
+  model: FlowModel,
+  rowByNodeId: Map<string, number>,
+  laneHeight: number,
+): Array<Node<PhaseBandData>> {
+  const boardWidth = model.lanes.length * LANE_WIDTH;
+  if (boardWidth <= 0 || model.phases.length === 0) return [];
+
+  const minRowByPhaseId = new Map<string, number>();
+  model.nodes.forEach((node) => {
+    const row = rowByNodeId.get(node.id);
+    if (row === undefined) return;
+    const current = minRowByPhaseId.get(node.phase_id);
+    if (current === undefined || row < current) minRowByPhaseId.set(node.phase_id, row);
+  });
+
+  const entries = model.phases
+    .map((phase, order) => ({ phase, order, minRow: minRowByPhaseId.get(phase.id) }))
+    .filter((entry): entry is { phase: FlowModel["phases"][number]; order: number; minRow: number } =>
+      entry.minRow !== undefined,
+    )
+    .sort((a, b) => a.minRow - b.minRow || a.order - b.order)
+    // フェーズが同じ行から始まる場合は先勝ちで1帯にまとめる
+    .filter((entry, index, sorted) => index === 0 || entry.minRow !== sorted[index - 1].minRow);
+
+  return entries.flatMap((entry, index) => {
+    const top =
+      index === 0
+        ? LANE_HEADER_HEIGHT
+        : Math.max(LANE_HEADER_HEIGHT, rowTopY(entry.minRow) - PHASE_BOUNDARY_OFFSET);
+    const next = entries[index + 1];
+    const bottom = next ? Math.max(LANE_HEADER_HEIGHT, rowTopY(next.minRow) - PHASE_BOUNDARY_OFFSET) : laneHeight;
+    const height = bottom - top;
+    if (height <= 0) return [];
+
+    return [
+      {
+        id: `phase-${entry.phase.id}`,
+        type: "phaseBandNode",
+        position: { x: 0, y: top },
+        data: {
+          kind: "phaseBand" as const,
+          phase: entry.phase,
+          bandIndex: index,
+          width: boardWidth,
+          height,
+          showBoundary: index > 0,
+        },
+        draggable: false,
+        selectable: false,
+        focusable: false,
+        zIndex: -5,
+        width: boardWidth,
+        height,
+        style: { width: boardWidth, height },
+      },
+    ];
+  });
 }
 
 function calculateDepths(model: FlowModel) {

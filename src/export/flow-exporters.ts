@@ -1,6 +1,6 @@
 import type { Edge, Node } from "@xyflow/react";
 import type { FlowModel } from "../domain/flow-model";
-import type { FlowEdgeData, FlowNodeData, LaneNodeData } from "../layout/flow-reactflow-types";
+import type { FlowEdgeData, FlowNodeData, LaneNodeData, PhaseBandData } from "../layout/flow-reactflow-types";
 import {
   LANE_HEADER_HEIGHT,
   LANE_PALETTE,
@@ -9,7 +9,7 @@ import {
   NODE_WIDTH_BY_TYPE,
 } from "../layout/swimlane-constants";
 
-type ExportNode = Node<FlowNodeData | LaneNodeData>;
+type ExportNode = Node<FlowNodeData | LaneNodeData | PhaseBandData>;
 type ExportEdge = Edge<FlowEdgeData>;
 
 export type FlowExportFormatId = "png" | "svg" | "xlsx";
@@ -71,6 +71,7 @@ function renderFlowSvg({ model, nodes, edges }: FlowExportContext) {
   const bounds = getExportBounds(nodes, edges);
   const flowNodes = nodes.filter((node): node is Node<FlowNodeData> => node.data.kind === "flow");
   const laneNodes = nodes.filter((node): node is Node<LaneNodeData> => node.data.kind === "lane");
+  const phaseBandNodes = nodes.filter((node): node is Node<PhaseBandData> => node.data.kind === "phaseBand");
   const width = bounds.width;
   const height = bounds.height;
 
@@ -84,6 +85,7 @@ function renderFlowSvg({ model, nodes, edges }: FlowExportContext) {
     "</defs>",
     `<rect x="${bounds.x}" y="${bounds.y}" width="${width}" height="${height}" fill="#eef2f5"/>`,
     ...laneNodes.map(renderLane),
+    ...phaseBandNodes.map(renderPhaseBand),
     ...edges.map(renderEdge),
     ...flowNodes.map(renderFlowNode),
     `<text x="${bounds.x + 20}" y="${bounds.y + height - 18}" fill="#657784" font-family="${fontFamily()}" font-size="11">${escapeXml(model.flow_id)}</text>`,
@@ -105,6 +107,22 @@ function renderLane(node: Node<LaneNodeData>) {
     `<text x="${x + 36}" y="${y + 35}" text-anchor="middle" dominant-baseline="central" fill="${color.accent}" font-family="${fontFamily()}" font-size="10" font-weight="800">${escapeXml(lane.id)}</text>`,
     `<text x="${x + 64}" y="${y + 26}" fill="#22313f" font-family="${fontFamily()}" font-size="14" font-weight="800">${escapeXml(lane.name)}</text>`,
     `<text x="${x + 64}" y="${y + 45}" fill="#657784" font-family="${fontFamily()}" font-size="10" font-weight="700">${escapeXml(lane.type)}</text>`,
+  ].join("");
+}
+
+function renderPhaseBand(node: Node<PhaseBandData>) {
+  const { phase, bandIndex, width, height, showBoundary } = node.data;
+  const x = node.position.x;
+  const y = node.position.y;
+  const chipWidth = Math.min(380, Math.max(60, estimateTextWidth(phase.name, 11) + 26));
+
+  return [
+    bandIndex % 2 === 1 ? `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="#1f3d54" fill-opacity="0.045"/>` : "",
+    showBoundary
+      ? `<line x1="${x}" y1="${y}" x2="${x + width}" y2="${y}" stroke="#46647a" stroke-opacity="0.5" stroke-width="2" stroke-dasharray="7 6"/>`
+      : "",
+    `<rect x="${x + 10}" y="${y + 9}" width="${chipWidth}" height="24" rx="12" fill="#ffffff" fill-opacity="0.92" stroke="#b9c9d4"/>`,
+    `<text x="${x + 10 + chipWidth / 2}" y="${y + 21}" text-anchor="middle" dominant-baseline="central" fill="#3c5162" font-family="${fontFamily()}" font-size="11" font-weight="800">${escapeXml(phase.name)}</text>`,
   ].join("");
 }
 
@@ -164,8 +182,9 @@ function renderEdge(edge: ExportEdge) {
 
 function getExportBounds(nodes: ExportNode[], edges: ExportEdge[]) {
   const nodeBounds = nodes.flatMap((node) => {
-    const width = node.data.kind === "lane" ? (node.data.width ?? LANE_WIDTH) : NODE_WIDTH_BY_TYPE[node.data.node.type];
-    const height = node.data.kind === "lane" ? node.data.height : NODE_HEIGHT_BY_TYPE[node.data.node.type];
+    const width =
+      node.data.kind === "flow" ? NODE_WIDTH_BY_TYPE[node.data.node.type] : (node.data.width ?? LANE_WIDTH);
+    const height = node.data.kind === "flow" ? NODE_HEIGHT_BY_TYPE[node.data.node.type] : node.data.height;
     return [
       { x: node.position.x, y: node.position.y },
       { x: node.position.x + width, y: node.position.y + height },
@@ -382,6 +401,7 @@ function buildWorkbookSheets({ model, nodes, edges }: FlowExportContext): SheetS
 
 function renderExcelDrawing({ nodes, edges }: FlowExportContext) {
   const laneNodes = nodes.filter((node): node is Node<LaneNodeData> => node.data.kind === "lane");
+  const phaseBandNodes = nodes.filter((node): node is Node<PhaseBandData> => node.data.kind === "phaseBand");
   const flowNodes = nodes.filter((node): node is Node<FlowNodeData> => node.data.kind === "flow");
   let shapeId = 1;
   const nextId = () => {
@@ -414,6 +434,49 @@ function renderExcelDrawing({ nodes, edges }: FlowExportContext) {
         color.header,
         `${lane.name}\n${lane.type}`,
         { fontSize: 10, bold: true, fontColor: "#22313f" },
+      ),
+    );
+  });
+
+  phaseBandNodes.forEach((node) => {
+    const { phase, bandIndex, width, height, showBoundary } = node.data;
+    const x = diagramX(node.position.x);
+    const y = diagramY(node.position.y);
+    if (bandIndex % 2 === 1) {
+      items.push(
+        shapeXml(nextId(), `phase-band-${phase.id}`, "rect", x, y, diagramSize(width), diagramSize(height), "#1f3d54", "#1f3d54", "", {
+          fillAlphaPercent: 4.5,
+          noStroke: true,
+        }),
+      );
+    }
+    if (showBoundary) {
+      items.push(
+        connectorXml(
+          nextId(),
+          `phase-boundary-${phase.id}`,
+          [node.position, { x: node.position.x + width, y: node.position.y }],
+          "#46647a",
+          true,
+          12700,
+          false,
+        ),
+      );
+    }
+    const chipWidth = Math.min(380, Math.max(60, estimateTextWidth(phase.name, 9) + 24));
+    items.push(
+      shapeXml(
+        nextId(),
+        `phase-label-${phase.id}`,
+        "roundRect",
+        x + diagramSize(10),
+        y + diagramSize(9),
+        diagramSize(chipWidth),
+        diagramSize(24),
+        "#ffffff",
+        "#b9c9d4",
+        phase.name,
+        { fontSize: 9, bold: true, fontColor: "#3c5162" },
       ),
     );
   });
@@ -515,6 +578,8 @@ type ShapeOptions = {
   fontSize?: number;
   bold?: boolean;
   fontColor?: string;
+  fillAlphaPercent?: number;
+  noStroke?: boolean;
 };
 
 function shapeXml(
@@ -530,10 +595,15 @@ function shapeXml(
   text = "",
   options: ShapeOptions = {},
 ) {
+  const alpha =
+    options.fillAlphaPercent !== undefined ? `<a:alpha val="${Math.round(options.fillAlphaPercent * 1000)}"/>` : "";
+  const line = options.noStroke
+    ? "<a:ln><a:noFill/></a:ln>"
+    : `<a:ln w="9525"><a:solidFill><a:srgbClr val="${hex(stroke)}"/></a:solidFill></a:ln>`;
   return [
     `${twoCellAnchorOpen(x, y, width, height)}`,
     `<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="${id}" name="${escapeXml(name)}"/><xdr:cNvSpPr/></xdr:nvSpPr>`,
-    `<xdr:spPr><a:xfrm><a:off x="${x}" y="${y}"/><a:ext cx="${Math.max(width, 1)}" cy="${Math.max(height, 1)}"/></a:xfrm><a:prstGeom prst="${preset}"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="${hex(fill)}"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="${hex(stroke)}"/></a:solidFill></a:ln></xdr:spPr>`,
+    `<xdr:spPr><a:xfrm><a:off x="${x}" y="${y}"/><a:ext cx="${Math.max(width, 1)}" cy="${Math.max(height, 1)}"/></a:xfrm><a:prstGeom prst="${preset}"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="${hex(fill)}"${alpha ? `>${alpha}</a:srgbClr>` : "/>"}</a:solidFill>${line}</xdr:spPr>`,
     textBodyXml(text, options),
     "</xdr:sp><xdr:clientData/></xdr:twoCellAnchor>",
   ].join("");
@@ -546,6 +616,7 @@ function connectorXml(
   color: string,
   dashed: boolean,
   lineWidthEmu = 19050,
+  arrowEnd = true,
 ) {
   const points = routePoints.map((point) => ({ x: diagramX(point.x), y: diagramY(point.y) }));
   const minX = Math.min(...points.map((point) => point.x));
@@ -563,7 +634,7 @@ function connectorXml(
   return [
     `${twoCellAnchorOpen(minX, minY, width, height)}`,
     `<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="${id}" name="${escapeXml(name)}"/><xdr:cNvSpPr/></xdr:nvSpPr>`,
-    `<xdr:spPr><a:xfrm><a:off x="${minX}" y="${minY}"/><a:ext cx="${width}" cy="${height}"/></a:xfrm><a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="${width}" b="${height}"/><a:pathLst><a:path w="${width}" h="${height}"><a:moveTo><a:pt x="${firstPoint?.x ?? 0}" y="${firstPoint?.y ?? 0}"/></a:moveTo>${linePoints.map((point) => `<a:lnTo><a:pt x="${point.x}" y="${point.y}"/></a:lnTo>`).join("")}</a:path></a:pathLst></a:custGeom><a:noFill/><a:ln w="${lineWidthEmu}"><a:solidFill><a:srgbClr val="${hex(color)}"/></a:solidFill>${dashed ? '<a:prstDash val="dash"/>' : ""}<a:tailEnd type="arrow"/></a:ln></xdr:spPr>`,
+    `<xdr:spPr><a:xfrm><a:off x="${minX}" y="${minY}"/><a:ext cx="${width}" cy="${height}"/></a:xfrm><a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="${width}" b="${height}"/><a:pathLst><a:path w="${width}" h="${height}"><a:moveTo><a:pt x="${firstPoint?.x ?? 0}" y="${firstPoint?.y ?? 0}"/></a:moveTo>${linePoints.map((point) => `<a:lnTo><a:pt x="${point.x}" y="${point.y}"/></a:lnTo>`).join("")}</a:path></a:pathLst></a:custGeom><a:noFill/><a:ln w="${lineWidthEmu}"><a:solidFill><a:srgbClr val="${hex(color)}"/></a:solidFill>${dashed ? '<a:prstDash val="dash"/>' : ""}${arrowEnd ? '<a:tailEnd type="arrow"/>' : ""}</a:ln></xdr:spPr>`,
     "</xdr:sp><xdr:clientData/></xdr:twoCellAnchor>",
   ].join("");
 }

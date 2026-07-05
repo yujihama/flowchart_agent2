@@ -1,4 +1,4 @@
-import type { FlowEdge, FlowNode, Lane } from "../domain/flow-model";
+import type { FlowEdge, FlowNode, Lane, Phase } from "../domain/flow-model";
 
 export type FlowNodeData = {
   kind: "flow";
@@ -13,6 +13,15 @@ export type LaneNodeData = {
   laneIndex: number;
   height: number;
   width?: number;
+};
+
+export type PhaseBandData = {
+  kind: "phaseBand";
+  phase: Phase;
+  bandIndex: number;
+  width: number;
+  height: number;
+  showBoundary: boolean;
 };
 
 export type FlowEdgeData = {
