@@ -393,6 +393,133 @@ textarea:focus {
   font-weight: 800;
 }
 
+.phase-band {
+  position: relative;
+  pointer-events: none;
+}
+
+.phase-band--alt {
+  background: rgba(31, 61, 84, 0.045);
+}
+
+.phase-band--boundary {
+  border-top: 2px dashed rgba(70, 100, 122, 0.45);
+}
+
+.phase-band__chip {
+  position: absolute;
+  top: 9px;
+  left: 10px;
+  display: inline-flex;
+  align-items: center;
+  max-width: 380px;
+  padding: 4px 12px;
+  border: 1px solid #b9c9d4;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #3c5162;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 2px 6px rgba(30, 48, 61, 0.1);
+}
+
+.legend-panel {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 12px;
+  border: 1px solid #cbd6de;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 8px 20px rgba(30, 48, 61, 0.1);
+  font-size: 11px;
+  font-weight: 700;
+  color: #3c5162;
+}
+
+.legend-title {
+  color: #17212b;
+  font-weight: 800;
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.legend-line {
+  display: inline-block;
+  width: 22px;
+  height: 0;
+  border-top: 2.5px solid #2f6f8f;
+}
+
+.legend-line--rollback {
+  border-top-color: #d94841;
+  border-top-style: dashed;
+}
+
+.legend-line--exception {
+  border-top-color: #b26a00;
+}
+
+.legend-line--escalation {
+  border-top-color: #6f4bb2;
+}
+
+.legend-shape--decision {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  background: #fff3cf;
+  border: 1px solid #c99d34;
+  transform: rotate(45deg) scale(0.82);
+}
+
+.react-flow__node {
+  transition: opacity 180ms ease;
+}
+
+.react-flow__edge {
+  transition: opacity 180ms ease;
+}
+
+.react-flow__node.is-muted {
+  opacity: 0.28;
+}
+
+.react-flow__edge.is-muted {
+  opacity: 0.14;
+}
+
+.react-flow__edge.is-focus .react-flow__edge-path {
+  filter: drop-shadow(0 0 3px rgba(34, 49, 63, 0.45));
+}
+
+.react-flow__edge:hover .react-flow__edge-path {
+  filter: drop-shadow(0 0 2.5px rgba(34, 49, 63, 0.5));
+  cursor: pointer;
+}
+
+.flow-node,
+.terminal-node,
+.decision-shell {
+  cursor: pointer;
+  transition: filter 160ms ease, transform 160ms ease;
+}
+
+.flow-node:hover,
+.terminal-node:hover,
+.decision-shell:hover {
+  filter: drop-shadow(0 12px 22px rgba(25, 42, 56, 0.24));
+  transform: translateY(-1px);
+}
+
 .process-node {
   width: 190px;
   min-height: 86px;

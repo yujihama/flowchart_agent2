@@ -3,10 +3,9 @@ import {
   Background,
   Controls,
   MiniMap,
+  Panel,
   ReactFlow,
   ReactFlowProvider,
-  useEdgesState,
-  useNodesState,
   type Edge,
   type Node,
 } from "@xyflow/react";
@@ -19,13 +18,14 @@ import {
   type FlowExportFormatId,
 } from "../export/flow-exporters";
 import { buildSwimlaneLayout } from "../layout/build-swimlane-layout";
-import type { FlowEdgeData, FlowNodeData, LaneNodeData } from "../layout/flow-reactflow-types";
+import type { FlowEdgeData, FlowNodeData, LaneNodeData, PhaseBandData } from "../layout/flow-reactflow-types";
 import { ProcessNode } from "./nodes/ProcessNode";
 import { DecisionNode } from "./nodes/DecisionNode";
 import { StartNode } from "./nodes/StartNode";
 import { EndNode } from "./nodes/EndNode";
 import { NodeDetailPanel } from "./panels/NodeDetailPanel";
 import { LaneNode } from "./nodes/LaneNode";
+import { PhaseBandNode } from "./nodes/PhaseBandNode";
 import { SwimlaneRoutedEdge } from "./edges/SwimlaneRoutedEdge";
 
 const nodeTypes = {
@@ -34,6 +34,7 @@ const nodeTypes = {
   startNode: StartNode,
   endNode: EndNode,
   laneNode: LaneNode,
+  phaseBandNode: PhaseBandNode,
 };
 
 const edgeTypes = {
@@ -51,28 +52,78 @@ type PreparedExport = {
   url: string;
 };
 
+type CanvasNode = Node<FlowNodeData | LaneNodeData | PhaseBandData>;
+
+type LayoutResult = {
+  nodes: CanvasNode[];
+  edges: Edge<FlowEdgeData>[];
+  failed: boolean;
+};
+
 export function FlowCanvas({ model }: { model: FlowModel }) {
-  const [nodes, setNodes, onNodesChange] = useNodesState<Node<FlowNodeData | LaneNodeData>>([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge<FlowEdgeData>>([]);
   const [selection, setSelection] = useState<Selection>(null);
-  const [layoutState, setLayoutState] = useState<"idle" | "running" | "failed">("idle");
   const [exportState, setExportState] = useState<"preparing" | "ready" | "failed">("preparing");
   const [preparedExports, setPreparedExports] = useState<PreparedExport[]>([]);
 
-  useEffect(() => {
-    setLayoutState("running");
+  const layout = useMemo<LayoutResult>(() => {
     try {
       const mapped = buildSwimlaneLayout(model);
-      setNodes(mapped.nodes);
-      setEdges(mapped.edges);
-      setSelection(null);
-      setLayoutState("idle");
-    } catch {
-      setLayoutState("failed");
+      return { nodes: mapped.nodes, edges: mapped.edges, failed: false };
+    } catch (error) {
+      console.error("Swimlane layout failed", error);
+      return { nodes: [], edges: [], failed: true };
     }
-  }, [model, setEdges, setNodes]);
+  }, [model]);
+  const layoutState = layout.failed ? "failed" : "idle";
 
-  const minimapNodeColor = useCallback((node: Node<FlowNodeData | LaneNodeData>) => {
+  useEffect(() => {
+    setSelection(null);
+  }, [layout]);
+
+  const highlight = useMemo(() => {
+    if (!selection) return null;
+    const nodeIds = new Set<string>();
+    const edgeIds = new Set<string>();
+    if (selection.type === "node") {
+      nodeIds.add(selection.item.id);
+      layout.edges.forEach((edge) => {
+        if (edge.source === selection.item.id || edge.target === selection.item.id) {
+          edgeIds.add(edge.id);
+          nodeIds.add(edge.source);
+          nodeIds.add(edge.target);
+        }
+      });
+    } else {
+      edgeIds.add(selection.item.id);
+      nodeIds.add(selection.item.from);
+      nodeIds.add(selection.item.to);
+    }
+    return { nodeIds, edgeIds };
+  }, [layout, selection]);
+
+  const displayNodes = useMemo(
+    () =>
+      layout.nodes.map((node) => {
+        if (node.data.kind !== "flow") return node;
+        const isSelected = selection?.type === "node" && selection.item.id === node.id;
+        const className = highlight ? (highlight.nodeIds.has(node.id) ? "is-focus" : "is-muted") : "";
+        return { ...node, selected: isSelected, className };
+      }),
+    [layout, highlight, selection],
+  );
+
+  const displayEdges = useMemo(
+    () =>
+      layout.edges.map((edge) => {
+        if (!highlight) return edge;
+        const isActive = highlight.edgeIds.has(edge.id);
+        return { ...edge, className: isActive ? "is-focus" : "is-muted", zIndex: isActive ? 12 : 0 };
+      }),
+    [layout, highlight],
+  );
+
+  const minimapNodeColor = useCallback((node: CanvasNode) => {
+    if (node.data.kind === "phaseBand") return "transparent";
     if (node.data.kind === "lane") return "#e6edf2";
     const type = node.data.node.type;
     if (type === "decision") return "#f3b544";
@@ -92,7 +143,7 @@ export function FlowCanvas({ model }: { model: FlowModel }) {
     const createdUrls: string[] = [];
 
     setPreparedExports([]);
-    if (layoutState !== "idle" || nodes.length === 0) {
+    if (layout.failed || layout.nodes.length === 0) {
       setExportState("preparing");
       return () => {
         createdUrls.forEach((url) => URL.revokeObjectURL(url));
@@ -102,7 +153,7 @@ export function FlowCanvas({ model }: { model: FlowModel }) {
     setExportState("preparing");
     Promise.all(
       FLOW_EXPORT_FORMATS.map(async (format) => {
-        const blob = await createFlowExportBlob(format.id, { model, nodes, edges });
+        const blob = await createFlowExportBlob(format.id, { model, nodes: layout.nodes, edges: layout.edges });
         const url = URL.createObjectURL(blob);
         createdUrls.push(url);
         if (canceled) {
@@ -136,7 +187,7 @@ export function FlowCanvas({ model }: { model: FlowModel }) {
       canceled = true;
       createdUrls.forEach((url) => URL.revokeObjectURL(url));
     };
-  }, [edges, layoutState, model, nodes]);
+  }, [layout, model]);
 
   const getPreparedExport = useCallback(
     (formatId: FlowExportFormatId) => preparedExports.find((item) => item.formatId === formatId),
@@ -171,7 +222,7 @@ export function FlowCanvas({ model }: { model: FlowModel }) {
               <span>{model.flow_id}</span>
               <span>{canvasMeta}</span>
               <span className={`layout-pill layout-pill--${layoutState}`}>
-                {layoutState === "running" ? "swimlane layout" : layoutState === "failed" ? "layout failed" : "ready"}
+                {layoutState === "failed" ? "layout failed" : "ready"}
               </span>
             </div>
             <div className="download-actions" aria-label="フロー図の出力">
@@ -200,24 +251,54 @@ export function FlowCanvas({ model }: { model: FlowModel }) {
         <div className="canvas-body">
           <div className="flow-stage">
             <ReactFlow
-              nodes={nodes}
-              edges={edges}
+              nodes={displayNodes}
+              edges={displayEdges}
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
-              onNodesChange={onNodesChange}
-              onEdgesChange={onEdgesChange}
               onNodeClick={(_, node) => {
-                if (node.data.kind === "flow") setSelection({ type: "node", item: node.data.node });
+                if (node.data.kind === "flow") {
+                  setSelection({ type: "node", item: node.data.node });
+                } else {
+                  setSelection(null);
+                }
               }}
               onEdgeClick={(_, edge) => edge.data && setSelection({ type: "edge", item: edge.data.edge })}
               onPaneClick={() => setSelection(null)}
               fitView
-              fitViewOptions={{ padding: 0.2 }}
+              fitViewOptions={{ padding: 0.15 }}
+              minZoom={0.05}
+              nodesDraggable={false}
+              nodesConnectable={false}
+              panOnScroll
+              zoomOnDoubleClick={false}
               proOptions={{ hideAttribution: true }}
             >
               <Background gap={22} size={1} color="#d5dee4" />
               <Controls showInteractive={false} />
               <MiniMap nodeColor={minimapNodeColor} pannable zoomable />
+              <Panel position="top-right" className="legend-panel">
+                <span className="legend-title">凡例</span>
+                <span className="legend-item">
+                  <i className="legend-line legend-line--normal" />
+                  通常
+                </span>
+                <span className="legend-item">
+                  <i className="legend-line legend-line--rollback" />
+                  差戻し
+                </span>
+                <span className="legend-item">
+                  <i className="legend-line legend-line--exception" />
+                  例外
+                </span>
+                <span className="legend-item">
+                  <i className="legend-line legend-line--escalation" />
+                  ｴｽｶﾚｰｼｮﾝ
+                </span>
+                <span className="legend-item">
+                  <i className="legend-shape legend-shape--decision" />
+                  判断
+                </span>
+              </Panel>
             </ReactFlow>
           </div>
           <NodeDetailPanel model={model} selection={selection} />

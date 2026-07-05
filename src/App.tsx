@@ -2,7 +2,7 @@
 import { AlertTriangle, CheckCircle2, FileInput, RefreshCcw } from "lucide-react";
 import sampleFlow from "./data/sample-flow.json";
 import type { FlowModel } from "./domain/flow-model";
-import { validateFlowModel } from "./domain/validators";
+import { parseFlowModelJson } from "./parsers/json-schema";
 import { FlowCanvas } from "./ui/FlowCanvas";
 
 const sampleJson = JSON.stringify(sampleFlow, null, 2);
@@ -10,7 +10,7 @@ const sampleJson = JSON.stringify(sampleFlow, null, 2);
 export function App() {
   const [rawJson, setRawJson] = useState(sampleJson);
   const [activeModel, setActiveModel] = useState<FlowModel>(sampleFlow as FlowModel);
-  const parsed = useMemo(() => parseJson(rawJson), [rawJson]);
+  const parsed = useMemo(() => parseFlowModelJson(rawJson), [rawJson]);
 
   const applyJson = () => {
     if (parsed.ok && parsed.validation.valid) {
@@ -71,20 +71,4 @@ export function App() {
       <FlowCanvas model={activeModel} />
     </main>
   );
-}
-
-function parseJson(rawJson: string) {
-  try {
-    const model = JSON.parse(rawJson) as FlowModel;
-    return {
-      ok: true as const,
-      model,
-      validation: validateFlowModel(model),
-    };
-  } catch (error) {
-    return {
-      ok: false as const,
-      message: error instanceof Error ? error.message : "JSONの解析に失敗しました",
-    };
-  }
 }
