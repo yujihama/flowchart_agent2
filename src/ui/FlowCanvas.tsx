@@ -212,7 +212,11 @@ export function FlowCanvas({ model }: { model: FlowModel }) {
               onEdgeClick={(_, edge) => edge.data && setSelection({ type: "edge", item: edge.data.edge })}
               onPaneClick={() => setSelection(null)}
               fitView
-              fitViewOptions={{ padding: 0.2 }}
+              fitViewOptions={{ padding: 0.08 }}
+              minZoom={0.05}
+              maxZoom={2.5}
+              nodesDraggable={false}
+              nodesConnectable={false}
               proOptions={{ hideAttribution: true }}
             >
               <Background gap={22} size={1} color="#d5dee4" />

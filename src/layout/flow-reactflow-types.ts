@@ -15,9 +15,16 @@ export type LaneNodeData = {
   width?: number;
 };
 
+/** エッジ端点の接続位置(Excel出力でカスタム接続点を選ぶために使う) */
+export type EdgeAnchorInfo = {
+  side: "top" | "bottom" | "left" | "right";
+  slot: number;
+};
+
 export type FlowEdgeData = {
   edge: FlowEdge;
   routePath?: Array<{ x: number; y: number }>;
   labelPoint?: { x: number; y: number };
-  skipHorizontalOverlapResolve?: boolean;
+  sourceAnchor?: EdgeAnchorInfo;
+  targetAnchor?: EdgeAnchorInfo;
 };
