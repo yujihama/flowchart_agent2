@@ -146,7 +146,7 @@ INVALID_MODEL = {
 
 
 def test_agent_loop() -> None:
-    print("[2] エージェント自己修正ループ結合テスト (フェイクLLM)")
+    print("[2] エージェント自己修正ループ結合テスト (フェイクLLM・部分更新)")
     from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
     from langchain_core.messages import AIMessage
 
@@ -158,17 +158,19 @@ def test_agent_loop() -> None:
         def bind_tools(self, tools, **kwargs):  # noqa: ANN001
             return self
 
-    def tool_call(name: str, payload: dict, call_id: str) -> AIMessage:
-        return AIMessage(
-            content="",
-            tool_calls=[{"name": name, "args": {"flow_model_json": json.dumps(payload, ensure_ascii=False)}, "id": call_id, "type": "tool_call"}],
-        )
+    def tool_call(name: str, args: dict, call_id: str) -> AIMessage:
+        return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": call_id, "type": "tool_call"}])
 
+    # 欠落した start ノードの追加と、不正参照エッジの削除を「部分更新」で行う台本
+    fix_patch = [
+        {"op": "upsert", "collection": "nodes", "item": VALID_MODEL["nodes"][0]},
+        {"op": "remove", "collection": "edges", "id": "E003"},
+    ]
     script = iter(
         [
-            tool_call("validate_flow_model_json", INVALID_MODEL, "call_1"),  # 初回: NGになる
-            tool_call("validate_flow_model_json", VALID_MODEL, "call_2"),    # 修正後: OK
-            tool_call("save_flow_model", VALID_MODEL, "call_3"),             # 保存
+            tool_call("submit_flow_model", {"flow_model_json": json.dumps(INVALID_MODEL, ensure_ascii=False)}, "call_1"),
+            tool_call("patch_flow_model", {"patch_operations_json": json.dumps(fix_patch, ensure_ascii=False)}, "call_2"),
+            tool_call("save_flow_model", {}, "call_3"),
             AIMessage(content="flow_model.json を生成し保存しました。"),
         ]
     )
@@ -179,22 +181,50 @@ def test_agent_loop() -> None:
         state = run("テスト用の業務説明", output_path, model=model)
 
         check("保存フラグが立つ", state["saved"] is True)
+        check("検証ループが NG -> OK", state.get("verdicts") == ["NG", "OK"])
+        check("パッチが2件適用される", state.get("patch_ops") == 2)
         check("出力ファイルが存在する", output_path.exists())
         saved, syntax_issue = parse_flow_model(output_path.read_text(encoding="utf-8"))
         check("保存されたJSONが構文的に正しい", syntax_issue is None)
         check("保存されたJSONが検証に合格する", validate_flow_model(saved).valid)
 
-    # 保存ツール単体: エラーが残るJSONは保存を拒否すること
+    # 安全網: 検証OKのドラフトを保存せず終了した場合の自動保存
+    autosave_script = iter(
+        [
+            tool_call("submit_flow_model", {"flow_model_json": json.dumps(VALID_MODEL, ensure_ascii=False)}, "call_1"),
+            AIMessage(content="生成しました。"),  # save_flow_model を呼ばずに終了
+        ]
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        output_path = Path(tmp) / "flow_model.json"
+        state = run("テスト用の業務説明", output_path, model=ScriptedToolModel(messages=autosave_script))
+        check("保存忘れ時に自動保存される", state["saved"] is True and state.get("autosaved") is True and output_path.exists())
+
+    # ツール単体の防御動作
     from flow_model_agent import build_tools
 
     with tempfile.TemporaryDirectory() as tmp:
         output_path = Path(tmp) / "flow_model.json"
         gate_state: dict = {"saved": False}
-        validate_tool, save_tool = build_tools(output_path, gate_state)
-        refuse = save_tool.invoke({"flow_model_json": json.dumps(INVALID_MODEL, ensure_ascii=False)})
-        check("検証NGのJSONは保存拒否", "保存できません" in refuse and not output_path.exists())
-        report = validate_tool.invoke({"flow_model_json": "{ broken json"})
+        submit_tool, patch_tool, save_tool = build_tools(output_path, gate_state)
+
+        no_draft = save_tool.invoke({})
+        check("ドラフト未提出の保存は拒否", "ドラフトがありません" in no_draft)
+        no_draft_patch = patch_tool.invoke({"patch_operations_json": "[]"})
+        check("ドラフト未提出のパッチは拒否", "ドラフトがありません" in no_draft_patch)
+
+        submit_tool.invoke({"flow_model_json": json.dumps(INVALID_MODEL, ensure_ascii=False)})
+        refuse = save_tool.invoke({})
+        check("検証NGのドラフトは保存拒否", "保存できません" in refuse and not output_path.exists())
+
+        report = submit_tool.invoke({"flow_model_json": "{ broken json"})
         check("構文エラーが位置情報付きで報告される", report.startswith("NG:") and "行" in report)
+
+        bad_patch = patch_tool.invoke({"patch_operations_json": json.dumps([
+            {"op": "upsert", "collection": "unknown", "item": {"id": "X1"}},
+            {"op": "remove", "collection": "edges", "id": "E999"},
+        ], ensure_ascii=False)})
+        check("不正パッチはエラー内容を返す", "失敗" in bad_patch and "unknown" in bad_patch)
 
 
 # ---------------------------------------------------------------------------

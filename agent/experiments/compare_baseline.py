@@ -26,12 +26,7 @@ sys.path.insert(0, str(AGENT_DIR))
 from flow_model_agent import SYSTEM_PROMPT, resolve_model, run as run_agent  # noqa: E402
 from flow_validator import parse_flow_model, validate_flow_model  # noqa: E402
 
-DOCS = [
-    AGENT_DIR / "examples" / "order_to_cash" / "01_juchu_kanri_kitei.txt",
-    AGENT_DIR / "examples" / "order_to_cash" / "02_shukka_butsuryu_tejunsho.txt",
-    AGENT_DIR / "examples" / "order_to_cash" / "03_seikyu_kaishu_kitei.txt",
-    AGENT_DIR / "examples" / "order_to_cash" / "04_henpin_claim_tejunsho.txt",
-]
+DOCS = sorted((AGENT_DIR / "examples" / "order_to_cash").glob("*.txt"))
 
 # エージェントのプロンプトからツール手順の節を除き、単発出力の指示に置き換える
 BASELINE_SYSTEM_PROMPT = (
@@ -102,6 +97,7 @@ def run_agent_trial(model_spec: str, description: str) -> dict:
         record["seconds"] = round(time.time() - started, 1)
         record["saved"] = state.get("saved", False)
         record["validate_loop"] = state.get("verdicts", [])
+        record["patch_ops"] = state.get("patch_ops", 0)
     return record
 
 
@@ -119,6 +115,10 @@ def main() -> int:
     def log(message: str) -> None:
         print(message, flush=True)
 
+    def flush_results() -> None:
+        # 途中クラッシュ・中断でも結果が残るよう、各トライアル後に逐次保存する
+        Path(args.output).write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+
     for model_spec in args.models:
         for trial in range(1, args.baseline_trials + 1):
             log(f"[baseline] {model_spec} trial {trial} ...")
@@ -129,6 +129,7 @@ def main() -> int:
                 traceback.print_exc()
             record.update({"condition": "baseline", "model": model_spec, "trial": trial})
             results.append(record)
+            flush_results()
             log(f"  -> valid={record.get('valid')} errors={record.get('errors')} warnings={record.get('warnings')} ({record.get('seconds')}s)")
 
         for trial in range(1, args.agent_trials + 1):
@@ -140,9 +141,9 @@ def main() -> int:
                 traceback.print_exc()
             record.update({"condition": "agent", "model": model_spec, "trial": trial})
             results.append(record)
-            log(f"  -> valid={record.get('valid')} loop={record.get('validate_loop')} ({record.get('seconds')}s)")
+            flush_results()
+            log(f"  -> valid={record.get('valid')} loop={record.get('validate_loop')} patches={record.get('patch_ops')} ({record.get('seconds')}s)")
 
-    Path(args.output).write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     log(f"saved: {args.output}")
 
     # サマリ表示
