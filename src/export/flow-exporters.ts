@@ -1,7 +1,14 @@
 import type { Edge, Node } from "@xyflow/react";
 import type { FlowModel } from "../domain/flow-model";
-import type { FlowEdgeData, FlowNodeData, LaneNodeData } from "../layout/flow-reactflow-types";
-import { LANE_PALETTE, LANE_WIDTH, NODE_HEIGHT_BY_TYPE, NODE_WIDTH_BY_TYPE } from "../layout/swimlane-constants";
+import type { EdgeAnchorInfo, FlowEdgeData, FlowNodeData, LaneNodeData } from "../layout/flow-reactflow-types";
+import {
+  ANCHOR_PERCENTS,
+  LANE_PALETTE,
+  LANE_WIDTH,
+  NODE_HEIGHT_BY_TYPE,
+  NODE_WIDTH_BY_TYPE,
+  SIDE_ANCHOR_OFFSETS,
+} from "../layout/swimlane-constants";
 
 type ExportNode = Node<FlowNodeData | LaneNodeData>;
 type ExportEdge = Edge<FlowEdgeData>;
@@ -408,7 +415,7 @@ function renderExcelDrawing({ nodes, edges }: FlowExportContext) {
     const shapeId = nodeShapeIdByNodeId.get(node.id) ?? nextId();
 
     if (flowNode.type === "decision") {
-      items.push(shapeXml(shapeId, flowNode.id, "diamond", x, y, w, h, "#fff3cf", "#c99d34", flowNode.label, {
+      items.push(nodeShapeXml(shapeId, flowNode.id, "diamond", x, y, w, h, "#fff3cf", "#c99d34", flowNode.label, {
         fontSize: 10,
         bold: true,
         fontColor: "#43340e",
@@ -418,10 +425,10 @@ function renderExcelDrawing({ nodes, edges }: FlowExportContext) {
 
     if (flowNode.type === "start" || flowNode.type === "end") {
       items.push(
-        shapeXml(
+        nodeShapeXml(
           shapeId,
           flowNode.id,
-          "roundRect",
+          "pill",
           x,
           y,
           w,
@@ -435,7 +442,7 @@ function renderExcelDrawing({ nodes, edges }: FlowExportContext) {
       return;
     }
 
-    items.push(shapeXml(shapeId, flowNode.id, "roundRect", x, y, w, h, "#ffffff", "#bccbd4", flowNode.label, {
+    items.push(nodeShapeXml(shapeId, flowNode.id, "roundRect", x, y, w, h, "#ffffff", "#bccbd4", flowNode.label, {
       fontSize: 10,
       bold: true,
       fontColor: "#17212b",
@@ -456,24 +463,28 @@ function renderExcelDrawing({ nodes, edges }: FlowExportContext) {
         data.edge.edge_type === "rollback",
         nodeShapeIdByNodeId.get(edge.source),
         nodeShapeIdByNodeId.get(edge.target),
+        anchorSiteIndex(data.sourceAnchor, edge.sourceHandle, CONNECTION_SITE_BASE.bottom),
+        anchorSiteIndex(data.targetAnchor, edge.targetHandle, CONNECTION_SITE_BASE.top),
       ),
     );
     const label = edge.label ? String(edge.label) : "";
     if (label) {
       const labelPoint = data.labelPoint ?? segmentMidpoint(points);
+      // 箱をテキスト幅ぴったりに抑え、隣のエッジ線を覆わないようにする
+      const box = edgeLabelBoxSize(label);
       items.push(
         shapeXml(
           nextId(),
           `edge-label-${edge.id}`,
           "roundRect",
-          diagramX(labelPoint.x) - diagramSize(44),
-          diagramY(labelPoint.y) - diagramSize(11),
-          diagramSize(88),
-          diagramSize(22),
+          diagramX(labelPoint.x) - Math.round(diagramSize(box.width) / 2),
+          diagramY(labelPoint.y) - Math.round(diagramSize(box.height) / 2),
+          diagramSize(box.width),
+          diagramSize(box.height),
           "#ffffff",
           "#ffffff",
           label,
-          { fontSize: 9, bold: true, fontColor: "#22313f" },
+          { fontSize: 9, bold: true, fontColor: "#22313f", tight: true },
         ),
       );
     }
@@ -491,7 +502,98 @@ type ShapeOptions = {
   fontSize?: number;
   bold?: boolean;
   fontColor?: string;
+  /** 小さなラベル箱向け: 余白なし・折り返しなしで描く */
+  tight?: boolean;
 };
+
+type NodeGeometryKind = "roundRect" | "pill" | "diamond";
+
+/**
+ * ノード図形本体。プリセットではなくカスタムジオメトリで出力し、UIのアンカー
+ * スロットと同じ位置に接続点(cxnLst)を定義する。これによりExcel上で複数の
+ * コネクタが同じ辺の別々の位置に接続でき、ノード移動後も配置が維持される。
+ */
+function nodeShapeXml(
+  id: number,
+  name: string,
+  kind: NodeGeometryKind,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  fill: string,
+  stroke: string,
+  text = "",
+  options: ShapeOptions = {},
+) {
+  return [
+    `${absoluteAnchorOpen(x, y, width, height)}`,
+    `<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="${id}" name="${escapeXml(name)}"/><xdr:cNvSpPr/></xdr:nvSpPr>`,
+    `<xdr:spPr><a:xfrm><a:off x="${x}" y="${y}"/><a:ext cx="${Math.max(width, 1)}" cy="${Math.max(height, 1)}"/></a:xfrm>${nodeCustGeomXml(kind, width, height)}<a:solidFill><a:srgbClr val="${hex(fill)}"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="${hex(stroke)}"/></a:solidFill></a:ln></xdr:spPr>`,
+    textBodyXml(text, options),
+    "</xdr:sp><xdr:clientData/></xdr:absoluteAnchor>",
+  ].join("");
+}
+
+function nodeCustGeomXml(kind: NodeGeometryKind, width: number, height: number) {
+  const sites = connectionSites(kind, width, height);
+  const cxnList = sites
+    .map((site) => `<a:cxn ang="${site.ang}"><a:pos x="${site.x}" y="${site.y}"/></a:cxn>`)
+    .join("");
+  return `<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst>${cxnList}</a:cxnLst><a:rect l="0" t="0" r="${width}" b="${height}"/><a:pathLst><a:path w="${width}" h="${height}">${nodePathXml(kind, width, height)}</a:path></a:pathLst></a:custGeom>`;
+}
+
+/** CONNECTION_SITE_BASE の並び(上0-4, 下5-9, 左10-14, 右15-19)で接続点を返す */
+function connectionSites(kind: NodeGeometryKind, width: number, height: number) {
+  const midX = Math.round(width / 2);
+  const midY = Math.round(height / 2);
+  const ANG = { up: 16200000, down: 5400000, left: 10800000, right: 0 };
+
+  if (kind === "diamond") {
+    // ひし形は上下左右の頂点のみが幾何学的に有効なため、全スロットを頂点に集約する
+    return [
+      ...ANCHOR_PERCENTS.map(() => ({ x: midX, y: 0, ang: ANG.up })),
+      ...ANCHOR_PERCENTS.map(() => ({ x: midX, y: height, ang: ANG.down })),
+      ...SIDE_ANCHOR_OFFSETS.map(() => ({ x: 0, y: midY, ang: ANG.left })),
+      ...SIDE_ANCHOR_OFFSETS.map(() => ({ x: width, y: midY, ang: ANG.right })),
+    ];
+  }
+
+  const cornerRadius = kind === "pill" ? midY : diagramSize(8);
+  const sideY = (offsetPx: number) =>
+    Math.min(height - cornerRadius, Math.max(cornerRadius, midY + diagramSize(offsetPx)));
+
+  return [
+    ...ANCHOR_PERCENTS.map((p) => ({ x: Math.round(width * p), y: 0, ang: ANG.up })),
+    ...ANCHOR_PERCENTS.map((p) => ({ x: Math.round(width * p), y: height, ang: ANG.down })),
+    ...SIDE_ANCHOR_OFFSETS.map((o) => ({ x: 0, y: kind === "pill" ? midY : sideY(o), ang: ANG.left })),
+    ...SIDE_ANCHOR_OFFSETS.map((o) => ({ x: width, y: kind === "pill" ? midY : sideY(o), ang: ANG.right })),
+  ];
+}
+
+function nodePathXml(kind: NodeGeometryKind, width: number, height: number) {
+  const midX = Math.round(width / 2);
+  const midY = Math.round(height / 2);
+
+  if (kind === "diamond") {
+    return `<a:moveTo><a:pt x="${midX}" y="0"/></a:moveTo><a:lnTo><a:pt x="${width}" y="${midY}"/></a:lnTo><a:lnTo><a:pt x="${midX}" y="${height}"/></a:lnTo><a:lnTo><a:pt x="0" y="${midY}"/></a:lnTo><a:close/>`;
+  }
+
+  const r = kind === "pill" ? midY : Math.min(diagramSize(8), midX, midY);
+  const quarter = 5400000;
+  return [
+    `<a:moveTo><a:pt x="${r}" y="0"/></a:moveTo>`,
+    `<a:lnTo><a:pt x="${width - r}" y="0"/></a:lnTo>`,
+    `<a:arcTo wR="${r}" hR="${r}" stAng="16200000" swAng="${quarter}"/>`,
+    `<a:lnTo><a:pt x="${width}" y="${height - r}"/></a:lnTo>`,
+    `<a:arcTo wR="${r}" hR="${r}" stAng="0" swAng="${quarter}"/>`,
+    `<a:lnTo><a:pt x="${r}" y="${height}"/></a:lnTo>`,
+    `<a:arcTo wR="${r}" hR="${r}" stAng="${quarter}" swAng="${quarter}"/>`,
+    `<a:lnTo><a:pt x="0" y="${r}"/></a:lnTo>`,
+    `<a:arcTo wR="${r}" hR="${r}" stAng="10800000" swAng="${quarter}"/>`,
+    `<a:close/>`,
+  ].join("");
+}
 
 function shapeXml(
   id: number,
@@ -507,60 +609,197 @@ function shapeXml(
   options: ShapeOptions = {},
 ) {
   return [
-    `${twoCellAnchorOpen(x, y, width, height)}`,
+    `${absoluteAnchorOpen(x, y, width, height)}`,
     `<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="${id}" name="${escapeXml(name)}"/><xdr:cNvSpPr/></xdr:nvSpPr>`,
     `<xdr:spPr><a:xfrm><a:off x="${x}" y="${y}"/><a:ext cx="${Math.max(width, 1)}" cy="${Math.max(height, 1)}"/></a:xfrm><a:prstGeom prst="${preset}"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="${hex(fill)}"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="${hex(stroke)}"/></a:solidFill></a:ln></xdr:spPr>`,
     textBodyXml(text, options),
-    "</xdr:sp><xdr:clientData/></xdr:twoCellAnchor>",
+    "</xdr:sp><xdr:clientData/></xdr:absoluteAnchor>",
   ].join("");
 }
 
+/**
+ * エッジをExcelの接続コネクタ(cxnSp)として出力する。stCxn/endCxnでノード図形の
+ * 接続点に論理接続するため、Excel上でノードを動かすとコネクタが追従する。
+ * 画面上の折れ線パターン(V-H-V等)をプリセットコネクタ形状+回転/反転+調整値へ
+ * 変換し、初期表示も画面のルーティングを再現する。
+ */
 function connectorXml(
   id: number,
   name: string,
   routePoints: Array<{ x: number; y: number }>,
   color: string,
   dashed: boolean,
-  _sourceShapeId?: number,
-  _targetShapeId?: number,
+  sourceShapeId?: number,
+  targetShapeId?: number,
+  sourceCxnIdx = 2,
+  targetCxnIdx = 0,
 ) {
-  const points = routePoints.map((point) => ({ x: diagramX(point.x), y: diagramY(point.y) }));
-  const minX = Math.min(...points.map((point) => point.x));
-  const minY = Math.min(...points.map((point) => point.y));
-  const maxX = Math.max(...points.map((point) => point.x));
-  const maxY = Math.max(...points.map((point) => point.y));
-  const width = Math.max(maxX - minX, 1);
-  const height = Math.max(maxY - minY, 1);
-  const relativePoints = points.map((point) => ({
-    x: Math.max(point.x - minX, 0),
-    y: Math.max(point.y - minY, 0),
-  }));
-  const [firstPoint, ...linePoints] = relativePoints;
+  const points = orthogonalizePoints(routePoints).map((point) => ({ x: diagramX(point.x), y: diagramY(point.y) }));
+  if (points.length < 2) return "";
+  const geometry = connectorGeometry(points);
+
+  const stCxn = sourceShapeId !== undefined ? `<a:stCxn id="${sourceShapeId}" idx="${sourceCxnIdx}"/>` : "";
+  const endCxn = targetShapeId !== undefined ? `<a:endCxn id="${targetShapeId}" idx="${targetCxnIdx}"/>` : "";
+  const rot = geometry.rot ? ` rot="${geometry.rot}"` : "";
+  const flips = `${geometry.flipH ? ' flipH="1"' : ""}${geometry.flipV ? ' flipV="1"' : ""}`;
+  const avList = geometry.adjustments
+    .map((value, index) => `<a:gd name="adj${index + 1}" fmla="val ${value}"/>`)
+    .join("");
 
   return [
-    `${twoCellAnchorOpen(minX, minY, width, height)}`,
-    `<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="${id}" name="${escapeXml(name)}"/><xdr:cNvSpPr/></xdr:nvSpPr>`,
-    `<xdr:spPr><a:xfrm><a:off x="${minX}" y="${minY}"/><a:ext cx="${width}" cy="${height}"/></a:xfrm><a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="${width}" b="${height}"/><a:pathLst><a:path w="${width}" h="${height}"><a:moveTo><a:pt x="${firstPoint?.x ?? 0}" y="${firstPoint?.y ?? 0}"/></a:moveTo>${linePoints.map((point) => `<a:lnTo><a:pt x="${point.x}" y="${point.y}"/></a:lnTo>`).join("")}</a:path></a:pathLst></a:custGeom><a:noFill/><a:ln w="19050"><a:solidFill><a:srgbClr val="${hex(color)}"/></a:solidFill>${dashed ? '<a:prstDash val="dash"/>' : ""}<a:tailEnd type="arrow"/></a:ln></xdr:spPr>`,
-    "</xdr:sp><xdr:clientData/></xdr:twoCellAnchor>",
+    `${absoluteAnchorOpen(geometry.anchorX, geometry.anchorY, geometry.anchorW, geometry.anchorH)}`,
+    `<xdr:cxnSp macro=""><xdr:nvCxnSpPr><xdr:cNvPr id="${id}" name="${escapeXml(name)}"/><xdr:cNvCxnSpPr>${stCxn}${endCxn}</xdr:cNvCxnSpPr></xdr:nvCxnSpPr>`,
+    `<xdr:spPr><a:xfrm${rot}${flips}><a:off x="${geometry.frameX}" y="${geometry.frameY}"/><a:ext cx="${geometry.frameW}" cy="${geometry.frameH}"/></a:xfrm><a:prstGeom prst="${geometry.preset}"><a:avLst>${avList}</a:avLst></a:prstGeom><a:noFill/><a:ln w="19050"><a:solidFill><a:srgbClr val="${hex(color)}"/></a:solidFill>${dashed ? '<a:prstDash val="dash"/>' : ""}<a:tailEnd type="triangle" w="med" len="med"/></a:ln></xdr:spPr>`,
+    "</xdr:cxnSp><xdr:clientData/></xdr:absoluteAnchor>",
   ].join("");
 }
 
-const ANCHOR_COL_WIDTH_EMU = 72 * 9525;
-const ANCHOR_ROW_HEIGHT_EMU = 24 * 9525;
+/**
+ * ノード図形はカスタムジオメトリで各辺に複数の接続点を持つ。
+ * 接続点の並び: 上0-4, 下5-9, 左10-14, 右15-19(各辺内はスロット順 = 中央→外側)。
+ * レイアウトが記録したアンカー情報から対応する接続点インデックスを求める。
+ */
+const CONNECTION_SITE_BASE: Record<EdgeAnchorInfo["side"], number> = {
+  top: 0,
+  bottom: 5,
+  left: 10,
+  right: 15,
+};
 
-function twoCellAnchorOpen(x: number, y: number, width: number, height: number) {
-  const from = cellAnchorPoint(x, y);
-  const to = cellAnchorPoint(x + Math.max(width, 1), y + Math.max(height, 1));
-  return `<xdr:twoCellAnchor><xdr:from><xdr:col>${from.col}</xdr:col><xdr:colOff>${from.colOff}</xdr:colOff><xdr:row>${from.row}</xdr:row><xdr:rowOff>${from.rowOff}</xdr:rowOff></xdr:from><xdr:to><xdr:col>${to.col}</xdr:col><xdr:colOff>${to.colOff}</xdr:colOff><xdr:row>${to.row}</xdr:row><xdr:rowOff>${to.rowOff}</xdr:rowOff></xdr:to>`;
+function anchorSiteIndex(anchor: EdgeAnchorInfo | undefined, handleId: string | null | undefined, fallback: number) {
+  if (anchor) {
+    return CONNECTION_SITE_BASE[anchor.side] + Math.min(Math.max(anchor.slot, 0), ANCHOR_PERCENTS.length - 1);
+  }
+  const side = handleId?.split("-")[1] as EdgeAnchorInfo["side"] | undefined;
+  return side && side in CONNECTION_SITE_BASE ? CONNECTION_SITE_BASE[side] : fallback;
 }
 
-function cellAnchorPoint(x: number, y: number) {
-  return {
-    col: Math.max(0, Math.floor(x / ANCHOR_COL_WIDTH_EMU)),
-    colOff: Math.max(0, Math.round(x % ANCHOR_COL_WIDTH_EMU)),
-    row: Math.max(0, Math.floor(y / ANCHOR_ROW_HEIGHT_EMU)),
-    rowOff: Math.max(0, Math.round(y % ANCHOR_ROW_HEIGHT_EMU)),
+type ConnectorGeometry = {
+  preset: string;
+  rot: number;
+  flipH: boolean;
+  flipV: boolean;
+  adjustments: number[];
+  frameX: number;
+  frameY: number;
+  frameW: number;
+  frameH: number;
+  /** アンカー用: 回転適用後の見た目のバウンディングボックス(Excelの解釈に合わせる) */
+  anchorX: number;
+  anchorY: number;
+  anchorW: number;
+  anchorH: number;
+};
+
+/**
+ * 直交折れ線をプリセットコネクタへ写像する。
+ * プリセットのパスはフレーム対角(0,0)→(w,h)を結ぶため、フレームは始点・終点の
+ * 外接矩形とし、途中の折れ位置は調整値(フレーム外もExcel仕様上有効)で表す。
+ * 垂直始まりの形状は90度回転で表現する(Excel自身と同じ書き方)。
+ */
+function connectorGeometry(points: Array<{ x: number; y: number }>): ConnectorGeometry {
+  const start = points[0];
+  const end = points[points.length - 1];
+  const minX = Math.min(start.x, end.x);
+  const minY = Math.min(start.y, end.y);
+  const width = Math.abs(start.x - end.x);
+  const height = Math.abs(start.y - end.y);
+
+  const signature = points
+    .slice(0, -1)
+    .map((point, index) => (points[index + 1].x === point.x ? "V" : "H"))
+    .join("");
+
+  const flat: ConnectorGeometry = {
+    preset: "straightConnector1",
+    rot: 0,
+    flipH: start.x > end.x,
+    flipV: start.y > end.y,
+    adjustments: [],
+    frameX: minX,
+    frameY: minY,
+    frameW: width,
+    frameH: height,
+    anchorX: minX,
+    anchorY: minY,
+    anchorW: width,
+    anchorH: height,
   };
+
+  // 90度回転フレーム: 中心を保ったまま縦横を入れ替える(アンカーは見た目のボックスのまま)
+  const rotated = {
+    rot: 5400000,
+    flipH: false,
+    flipV: start.x < end.x,
+    frameX: minX + Math.round((width - height) / 2),
+    frameY: minY + Math.round((height - width) / 2),
+    frameW: height,
+    frameH: width,
+  };
+
+  const fraction = (value: number, total: number) => (total > 0 ? Math.round((value / total) * 100000) : 50000);
+
+  if (signature === "V" || signature === "H") {
+    return flat;
+  }
+
+  if (signature === "HV") {
+    return { ...flat, preset: "bentConnector2" };
+  }
+
+  if (signature === "VH") {
+    return { ...flat, ...rotated, preset: "bentConnector2" };
+  }
+
+  if (signature === "HVH") {
+    const jogX = points[1].x;
+    const x1 = flat.flipH ? minX + width - jogX : jogX - minX;
+    return { ...flat, preset: "bentConnector3", adjustments: [fraction(x1, width)] };
+  }
+
+  if (signature === "VHV") {
+    const jogY = points[1].y;
+    return { ...flat, ...rotated, preset: "bentConnector3", adjustments: [fraction(jogY - minY, height)] };
+  }
+
+  if (signature === "HVHV") {
+    const jogX = points[1].x;
+    const jogY = points[2].y;
+    const x1 = flat.flipH ? minX + width - jogX : jogX - minX;
+    const y1 = flat.flipV ? minY + height - jogY : jogY - minY;
+    return {
+      ...flat,
+      preset: "bentConnector4",
+      adjustments: [fraction(x1, width), fraction(y1, height)],
+    };
+  }
+
+  if (signature === "VHVHV") {
+    const jogAY = points[1].y;
+    const jogX = points[2].x;
+    const jogBY = points[3].y;
+    const y2 = rotated.flipV ? jogX - minX : minX + width - jogX;
+    return {
+      ...flat,
+      ...rotated,
+      preset: "bentConnector5",
+      adjustments: [fraction(jogAY - minY, height), fraction(y2, width), fraction(jogBY - minY, height)],
+    };
+  }
+
+  // 想定外のパターン: 接続だけは維持し、経路はExcelの既定ルーティングに委ねる
+  const startsVertical = signature.startsWith("V");
+  return startsVertical
+    ? { ...flat, ...rotated, preset: "bentConnector3", adjustments: [50000] }
+    : { ...flat, preset: "bentConnector3", adjustments: [50000] };
+}
+
+/**
+ * セルの行高・列幅に依存しないEMU絶対座標アンカー。
+ * セルアンカーは実際の既定行高(フォント依存)で解釈がずれるため使わない。
+ */
+function absoluteAnchorOpen(x: number, y: number, width: number, height: number) {
+  return `<xdr:absoluteAnchor><xdr:pos x="${Math.max(0, Math.round(x))}" y="${Math.max(0, Math.round(y))}"/><xdr:ext cx="${Math.max(1, Math.round(width))}" cy="${Math.max(1, Math.round(height))}"/>`;
 }
 
 function textBodyXml(text: string, options: ShapeOptions) {
@@ -570,7 +809,22 @@ function textBodyXml(text: string, options: ShapeOptions) {
   const paragraphs = text
     ? text.split("\n").map((line) => `<a:p><a:pPr algn="ctr"/><a:r><a:rPr lang="ja-JP" sz="${fontSize}"${bold}><a:solidFill><a:srgbClr val="${color}"/></a:solidFill></a:rPr><a:t>${escapeXml(line)}</a:t></a:r></a:p>`)
     : ["<a:p/>"];
-  return `<xdr:txBody><a:bodyPr wrap="square" anchor="ctr" lIns="45720" tIns="22860" rIns="45720" bIns="22860"/><a:lstStyle/>${paragraphs.join("")}</xdr:txBody>`;
+  const bodyPr = options.tight
+    ? '<a:bodyPr wrap="none" anchor="ctr" lIns="0" tIns="0" rIns="0" bIns="0"/>'
+    : '<a:bodyPr wrap="square" anchor="ctr" lIns="45720" tIns="22860" rIns="45720" bIns="22860"/>';
+  return `<xdr:txBody>${bodyPr}<a:lstStyle/>${paragraphs.join("")}</xdr:txBody>`;
+}
+
+/** ラベル文字列から白背景ボックスの寸法(px)を見積もる(9pt想定) */
+function edgeLabelBoxSize(label: string) {
+  let units = 0;
+  for (const ch of label) {
+    units += (ch.codePointAt(0) ?? 0) > 0xff ? 1 : 0.55;
+  }
+  return {
+    width: Math.max(24, Math.ceil(units * 12.5) + 8),
+    height: 17,
+  };
 }
 
 function diagramX(value: number) {

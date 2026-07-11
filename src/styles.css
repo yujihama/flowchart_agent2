@@ -307,10 +307,7 @@ textarea:focus {
 }
 
 .react-flow {
-  background:
-    linear-gradient(0deg, rgba(47, 111, 143, 0.05) 1px, transparent 1px),
-    #eef2f5;
-  background-size: 100% 150px;
+  background: #eef2f5;
 }
 
 .react-flow__controls {
@@ -342,9 +339,7 @@ textarea:focus {
   background:
     linear-gradient(180deg, var(--lane-header) 0, var(--lane-header) 62px, transparent 62px),
     linear-gradient(90deg, color-mix(in srgb, var(--lane-accent) 18%, transparent) 0, transparent 5px),
-    linear-gradient(0deg, rgba(64, 92, 108, 0.06) 1px, transparent 1px),
     var(--lane-fill);
-  background-size: 100% 100%, 100% 100%, 100% 150px, 100% 100%;
   pointer-events: none;
 }
 
