@@ -656,19 +656,20 @@ function connectorXml(
 
 /**
  * ノード図形はカスタムジオメトリで各辺に複数の接続点を持つ。
- * 接続点の並び: 上0-4, 下5-9, 左10-14, 右15-19(各辺内はスロット順 = 中央→外側)。
+ * 接続点の並び: 上(ANCHOR_PERCENTS順) → 下(同) → 左(SIDE_ANCHOR_OFFSETS順) → 右(同)。
  * レイアウトが記録したアンカー情報から対応する接続点インデックスを求める。
  */
 const CONNECTION_SITE_BASE: Record<EdgeAnchorInfo["side"], number> = {
   top: 0,
-  bottom: 5,
-  left: 10,
-  right: 15,
+  bottom: ANCHOR_PERCENTS.length,
+  left: ANCHOR_PERCENTS.length * 2,
+  right: ANCHOR_PERCENTS.length * 2 + SIDE_ANCHOR_OFFSETS.length,
 };
 
 function anchorSiteIndex(anchor: EdgeAnchorInfo | undefined, handleId: string | null | undefined, fallback: number) {
   if (anchor) {
-    return CONNECTION_SITE_BASE[anchor.side] + Math.min(Math.max(anchor.slot, 0), ANCHOR_PERCENTS.length - 1);
+    const slotMax = (anchor.side === "top" || anchor.side === "bottom" ? ANCHOR_PERCENTS.length : SIDE_ANCHOR_OFFSETS.length) - 1;
+    return CONNECTION_SITE_BASE[anchor.side] + Math.min(Math.max(anchor.slot, 0), slotMax);
   }
   const side = handleId?.split("-")[1] as EdgeAnchorInfo["side"] | undefined;
   return side && side in CONNECTION_SITE_BASE ? CONNECTION_SITE_BASE[side] : fallback;

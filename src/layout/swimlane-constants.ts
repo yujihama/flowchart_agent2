@@ -44,10 +44,11 @@ export const NODE_HEIGHT_BY_TYPE: Record<FlowNode["type"], number> = {
 export const LANE_SIDE_REGION = (LANE_WIDTH - Math.max(...Object.values(NODE_WIDTH_BY_TYPE))) / 2;
 
 /**
- * ノード上下辺のアンカーX位置(中央→左→右→内側の順)。
+ * ノード上下辺のアンカーX位置(中央→左→右→内側→外側の順)。
  * Excel出力のカスタム接続点もこの並びで定義するため、順序を変えないこと。
+ * (0.22 は最小ノード(端子124px)の角丸半径ぎりぎりに収まる値)
  */
-export const ANCHOR_PERCENTS = [0.5, 0.3, 0.7, 0.4, 0.6] as const;
+export const ANCHOR_PERCENTS = [0.5, 0.3, 0.7, 0.4, 0.6, 0.22, 0.78] as const;
 
 /** ノード左右辺のアンカーY(中心からのpxオフセット、スロット順) */
 export const SIDE_ANCHOR_OFFSETS = [0, -11, 11, -22, 22] as const;
