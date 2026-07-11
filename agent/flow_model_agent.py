@@ -70,8 +70,9 @@ def resolve_model(spec: str | BaseChatModel) -> BaseChatModel:
         from langchain_openai import ChatOpenAI
 
         # GPT-5系の推論モデルはツール使用時に Responses API を要求する
-        # (旧モデルも Responses API で問題なく動く)
-        return ChatOpenAI(model=model_name, use_responses_api=True)
+        # (旧モデルも Responses API で問題なく動く)。
+        # timeout/max_retries を明示し、無応答時の長時間ハングを防ぐ。
+        return ChatOpenAI(model=model_name, use_responses_api=True, timeout=240, max_retries=1)
 
     if provider in ("azure_openai", "azureopenai", "azure"):
         _require_env("azure_openai", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT")
@@ -92,6 +93,8 @@ def resolve_model(spec: str | BaseChatModel) -> BaseChatModel:
             model=model_name,
             api_key=os.environ["OPENROUTER_API_KEY"],
             base_url=os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_DEFAULT_BASE_URL),
+            timeout=240,
+            max_retries=1,
         )
 
     raise ModelConfigError(
@@ -153,53 +156,163 @@ SYSTEM_PROMPT = """\
 # 作業手順(必ず守ること)
 
 1. 説明文からレーン・フェーズ・ノード・エッジを設計し、flow_model.json 全体を組み立てる
-2. validate_flow_model_json ツールで必ず検証する(JSONは省略せず全文を渡す)
-3. エラーが報告されたら、レポートに基づいて自分でJSONを修正し、再度検証する。
-   エラーが0件になるまでこれを繰り返す。警告も可能な限り解消する
-4. エラーが無くなったら save_flow_model ツールで保存する(検証に合格していないと保存できない)
+2. submit_flow_model ツールでドラフト全文を提出し、検証レポートを受け取る
+3. エラーが報告されたら、patch_flow_model ツールで**該当箇所だけを部分更新**する
+   (全文の再生成より速く、無関係な箇所を壊さないため原則パッチを使う)。
+   パッチ適用のたびに自動で再検証される。エラーが0件になるまで繰り返し、
+   警告も可能な限り解消する。
+   例外: パッチを2回適用してもエラー件数が減らない場合に限り、
+   修正済みの全文を submit_flow_model で再提出して仕切り直してよい
+4. エラーが無くなったら save_flow_model ツール(引数なし)で保存する
+   (検証に合格していないと保存できない)
 5. 最後に、設計の要点(レーン構成・分岐・差戻しの扱い)を簡潔に日本語で報告する
 
 ツールに渡すJSONは必ず完全なJSON文字列のみとし、コードフェンスや説明文を混ぜないこと。
 """
 
 
+PATCH_COLLECTIONS = ("lanes", "phases", "nodes", "edges", "sources")
+META_FIELDS = {"schema_version", "flow_id", "title", "description"}
+
+
+def apply_patch_operation(draft: dict, operation: dict) -> str | None:
+    """ドラフトへ1つのパッチ操作を適用する。失敗時はエラーメッセージを返す。"""
+    kind = operation.get("op")
+
+    if kind == "set_meta":
+        fields = operation.get("fields")
+        if not isinstance(fields, dict):
+            return "set_meta: fields はオブジェクトで指定してください"
+        unknown = set(fields) - META_FIELDS
+        if unknown:
+            return f"set_meta: 更新できないフィールドです: {sorted(unknown)}"
+        draft.update(fields)
+        return None
+
+    collection = operation.get("collection")
+    if collection not in PATCH_COLLECTIONS:
+        return f"未知の collection です: {collection}(指定可能: {'/'.join(PATCH_COLLECTIONS)})"
+    items = draft.setdefault(collection, [])
+    if not isinstance(items, list):
+        return f"{collection} が配列ではありません"
+
+    if kind == "upsert":
+        item = operation.get("item")
+        if not isinstance(item, dict) or not item.get("id"):
+            return "upsert: item に id を持つオブジェクトを指定してください"
+        for index, existing in enumerate(items):
+            if isinstance(existing, dict) and existing.get("id") == item["id"]:
+                items[index] = item
+                return None
+        items.append(item)
+        return None
+
+    if kind == "remove":
+        target_id = operation.get("id")
+        remaining = [x for x in items if not (isinstance(x, dict) and x.get("id") == target_id)]
+        if len(remaining) == len(items):
+            return f"remove: {collection} に id {target_id} が見つかりません"
+        items[:] = remaining
+        return None
+
+    return f"未知の op です: {kind}(指定可能: upsert / remove / set_meta)"
+
+
 def build_tools(output_path: Path, state: dict):
-    """出力先を閉じ込めたツール群を生成する(保存先はエージェントに選ばせない)。"""
+    """出力先とドラフトを閉じ込めたツール群を生成する(保存先はエージェントに選ばせない)。"""
+
+    def record_verdict(report: str) -> None:
+        state["validate_calls"] = state.get("validate_calls", 0) + 1
+        state.setdefault("verdicts", []).append("OK" if report.startswith("OK") else "NG")
 
     @tool
-    def validate_flow_model_json(flow_model_json: str) -> str:
-        """flow_model.json の構文と整合性を検証し、エラー・警告のレポートを返す。
+    def submit_flow_model(flow_model_json: str) -> str:
+        """flow_model.json のドラフト全文を提出し、検証レポートを受け取る。
 
-        保存前に必ず呼ぶこと。引数にはJSON文字列全文を渡す。
+        最初に1回だけ使う。以降のエラー修正は patch_flow_model で部分更新すること。
         """
-        state["validate_calls"] = state.get("validate_calls", 0) + 1
         model, syntax_issue = parse_flow_model(flow_model_json)
         if syntax_issue is not None:
             report = f"NG: {syntax_issue.message}"
-        else:
-            report = format_validation_report(validate_flow_model(model))
-        state.setdefault("verdicts", []).append("OK" if report.startswith("OK") else "NG")
-        return report
+            record_verdict(report)
+            return report
+        state["draft"] = model
+        result = validate_flow_model(model)
+        state["last_error_count"] = len(result.errors)
+        report = format_validation_report(result)
+        record_verdict(report)
+        return report + "\n(修正は patch_flow_model による部分更新で行ってください)"
 
     @tool
-    def save_flow_model(flow_model_json: str) -> str:
-        """検証に合格した flow_model.json を保存する。
+    def patch_flow_model(patch_operations_json: str) -> str:
+        """提出済みドラフトへ部分更新を適用し、自動で再検証する。全文の再生成は不要。
+
+        patch_operations_json は操作のJSON配列:
+          {"op": "upsert", "collection": "lanes|phases|nodes|edges|sources", "item": {...}}
+            … 同じ id があれば置換、なければ追加
+          {"op": "remove", "collection": "...", "id": "E012"}
+          {"op": "set_meta", "fields": {"title": "...", "description": "..."}}
+        """
+        draft = state.get("draft")
+        if draft is None or not isinstance(draft, dict):
+            return "ドラフトがありません。先に submit_flow_model で全文を提出してください。"
+        try:
+            operations = json.loads(patch_operations_json)
+        except json.JSONDecodeError as error:
+            return f"パッチのJSON構文エラー: {error.msg} (行{error.lineno} 列{error.colno})"
+        if isinstance(operations, dict):
+            operations = [operations]
+        if not isinstance(operations, list):
+            return "パッチは操作オブジェクトのJSON配列で指定してください。"
+
+        failures = []
+        applied = 0
+        for index, operation in enumerate(operations):
+            if not isinstance(operation, dict):
+                failures.append(f"[{index}] 操作がオブジェクトではありません")
+                continue
+            error = apply_patch_operation(draft, operation)
+            if error:
+                failures.append(f"[{index}] {error}")
+            else:
+                applied += 1
+        state["patch_ops"] = state.get("patch_ops", 0) + applied
+
+        result = validate_flow_model(draft)
+        report = format_validation_report(result)
+        record_verdict(report)
+        previous_errors = state.get("last_error_count")
+        state["last_error_count"] = len(result.errors)
+        progress = ""
+        if previous_errors is not None:
+            if len(result.errors) < previous_errors:
+                progress = f"(エラー {previous_errors}件 → {len(result.errors)}件に減少)"
+            elif len(result.errors) > previous_errors:
+                progress = f"(エラー {previous_errors}件 → {len(result.errors)}件に増加。直前のパッチを見直すこと)"
+            elif result.errors:
+                progress = f"(エラー件数が {previous_errors}件のまま変化なし)"
+        header = f"パッチ適用: {applied}件成功" + (f" / {len(failures)}件失敗: {'; '.join(failures)}" if failures else "") + progress
+        return f"{header}\n{report}"
+
+    @tool
+    def save_flow_model() -> str:
+        """検証エラーが0件のドラフトをファイルへ保存する。
 
         エラーが1件でも残っている場合は保存されず、レポートが返る。
         """
-        model, syntax_issue = parse_flow_model(flow_model_json)
-        if syntax_issue is not None:
-            return f"保存できません。{syntax_issue.message}"
-        result = validate_flow_model(model)
+        draft = state.get("draft")
+        if draft is None:
+            return "ドラフトがありません。先に submit_flow_model で全文を提出してください。"
+        result = validate_flow_model(draft)
         if not result.valid:
-            return "保存できません。先にエラーを修正してください。\n" + format_validation_report(result)
+            return "保存できません。patch_flow_model でエラーを修正してください。\n" + format_validation_report(result)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(model, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output_path.write_text(json.dumps(draft, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         state["saved"] = True
         state["warnings"] = len(result.warnings)
         return f"保存しました: {output_path} (エラー0件 / 警告{len(result.warnings)}件)"
 
-    return [validate_flow_model_json, save_flow_model]
+    return [submit_flow_model, patch_flow_model, save_flow_model]
 
 
 def build_agent(model, output_path: Path, state: dict):
@@ -220,6 +333,18 @@ def run(description: str, output_path: Path, model=DEFAULT_MODEL, recursion_limi
     )
     final = result["messages"][-1]
     state["final_message"] = getattr(final, "content", "")
+
+    # 安全網: 検証エラー0件のドラフトを持ったまま保存せずに終了した場合は自動保存する
+    if not state.get("saved"):
+        draft = state.get("draft")
+        if isinstance(draft, dict):
+            validation = validate_flow_model(draft)
+            if validation.valid:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(json.dumps(draft, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                state["saved"] = True
+                state["autosaved"] = True
+                state["warnings"] = len(validation.warnings)
     return state
 
 
@@ -264,11 +389,12 @@ def main() -> int:
 
     print(state.get("final_message", ""))
     verdicts = state.get("verdicts", [])
-    print(f"\n[検証ループ] {len(verdicts)}回実行: {' -> '.join(verdicts) if verdicts else '(なし)'}")
+    print(f"\n[検証ループ] {len(verdicts)}回実行: {' -> '.join(verdicts) if verdicts else '(なし)'} / パッチ適用 {state.get('patch_ops', 0)}件")
     if not state["saved"]:
         print("\n[NG] 検証に合格するJSONを保存できませんでした。", file=sys.stderr)
         return 1
-    print(f"\n[OK] {output_path} を保存しました(警告 {state.get('warnings', 0)}件)")
+    autosaved = "(エージェントが保存を省略したため自動保存)" if state.get("autosaved") else ""
+    print(f"\n[OK] {output_path} を保存しました(警告 {state.get('warnings', 0)}件){autosaved}")
     return 0
 
 
