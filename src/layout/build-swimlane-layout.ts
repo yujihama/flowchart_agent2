@@ -277,21 +277,27 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
   const corridorTracks = new TrackAllocator();
   const gutterTracks = new TrackAllocator();
   const stubTracks = new TrackAllocator();
-  const bottomAnchorCount = new Map<string, number>();
-  const topAnchorCount = new Map<string, number>();
 
   const laneCenterX = (laneIndex: number) => laneIndex * LANE_WIDTH + LANE_WIDTH / 2;
 
-  const nextAnchorX = (placed: PlacedNode, counter: Map<string, number>) => {
-    const used = counter.get(placed.node.id) ?? 0;
-    counter.set(placed.node.id, used + 1);
-    const index = Math.min(used, ANCHOR_PERCENTS.length - 1);
-    const percent = ANCHOR_PERCENTS[index];
-    return {
-      x: laneCenterX(placed.laneIndex) - placed.width / 2 + placed.width * percent,
-      slot: anchorPercentToSlot(percent),
-      index,
-    };
+  // アンカーXは「コリドー(行間の帯) × X位置」単位で一意に割り当てる。
+  // 同じ帯を縦に横切るスタブ同士(上のノードの出口と下のノードへの進入)が
+  // 同じXを取ると重なるため、ノード単位ではなく帯単位で衝突を防ぐ。
+  const anchorRegistry = new Set<string>();
+  const anchorKey = (corridorIndex: number, x: number) => `${corridorIndex}:${Math.round(x)}`;
+  const registerAnchor = (corridorIndex: number, x: number) => anchorRegistry.add(anchorKey(corridorIndex, x));
+
+  const nextAnchorX = (placed: PlacedNode, corridorIndex: number) => {
+    const leftX = laneCenterX(placed.laneIndex) - placed.width / 2;
+    for (let index = 0; index < ANCHOR_PERCENTS.length; index += 1) {
+      const x = leftX + placed.width * ANCHOR_PERCENTS[index];
+      if (!anchorRegistry.has(anchorKey(corridorIndex, x))) {
+        registerAnchor(corridorIndex, x);
+        return { x, slot: anchorPercentToSlot(ANCHOR_PERCENTS[index]), index };
+      }
+    }
+    const index = ANCHOR_PERCENTS.length - 1;
+    return { x: leftX + placed.width * ANCHOR_PERCENTS[index], slot: anchorPercentToSlot(ANCHOR_PERCENTS[index]), index };
   };
 
   // 同じ行から同じガターへ出る水平ステブ同士の重なりをYオフセットで避ける
@@ -302,6 +308,14 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
 
   // decisionノードの分岐エッジを先に振り分ける(左右の頂点と真下を使い分ける)
   const decisionExitSideByEdgeId = planDecisionExits(model, placement);
+
+  // decisionの真下出しはひし形頂点(レーン中央)固定なので、先に帯へ登録して
+  // 他ノードの進入スタブが同じXを取らないようにする
+  model.edges.forEach((edge) => {
+    if (decisionExitSideByEdgeId.get(edge.id) !== "bottom") return;
+    const source = placement.placedById.get(edge.from);
+    if (source) registerAnchor(source.row, laneCenterX(source.laneIndex));
+  });
 
   const routedEdges: RoutedEdge[] = [];
 
@@ -326,9 +340,9 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
       const detours =
         source.laneIndex === target.laneIndex &&
         !isColumnClear(placement, source.laneIndex, source.row, target.row);
-      let entry = nextAnchorX(target, topAnchorCount);
+      let entry = nextAnchorX(target, target.row - 1);
       for (let retry = 0; detours && entry.x === exitX && retry < 3; retry += 1) {
-        entry = nextAnchorX(target, topAnchorCount);
+        entry = nextAnchorX(target, target.row - 1);
       }
       return entry;
     };
@@ -346,7 +360,7 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
       sourceAnchor = { side: "bottom", slot: 0 };
       targetAnchor = { side: "top", slot: entry.index };
     } else if (forward && !decisionSide) {
-      const exit = nextAnchorX(source, bottomAnchorCount);
+      const exit = nextAnchorX(source, source.row);
       const entry = allocateEntry(exit.x);
       const built = buildBottomExitRoute(source, target, placement, corridorTracks, gutterTracks, {
         exit,
@@ -364,7 +378,7 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
           ? decisionSide
           : sideTowardTarget(source, target);
       const gutterIndex = side === "left" ? source.laneIndex : source.laneIndex + 1;
-      const entry = nextAnchorX(target, topAnchorCount);
+      const entry = nextAnchorX(target, target.row - 1);
       const stub = nextSideOffset(gutterIndex, source.row);
       const corridorIndex = target.row - 1;
       const gutterTrack = gutterTracks.reserve(
