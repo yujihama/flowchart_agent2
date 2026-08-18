@@ -161,33 +161,69 @@ checked.forEach((edge) => {
   const tp = edge.path[edge.path.length - 1];
   const sSide = sideOf(s, sp);
   const tSide = sideOf(t, tp);
+  // 同じ辺の入出は物理的に位置を分け合うため、中央判定(S2-1)は入出合算で行う
   addBundle(`${edge.source}|${sSide}|out`, sSide === "left" || sSide === "right" ? sp.y : sp.x, edge);
   addBundle(`${edge.target}|${tSide}|in`, tSide === "left" || tSide === "right" ? tp.y : tp.x, edge);
+  addBundle(`${edge.source}|${sSide}|all`, sSide === "left" || sSide === "right" ? sp.y : sp.x, edge);
+  addBundle(`${edge.target}|${tSide}|all`, tSide === "left" || tSide === "right" ? tp.y : tp.x, edge);
 });
 
+/**
+ * E2例外: その辺の中央の列を、他エッジの縦セグメントが隣接コリドー帯で使っており、
+ * 中央に置くと線の重なり(交差の退化)になる場合。
+ */
+const centerBlockedByOther = (rect: Rect, side: string, members: CheckedEdge[]) => {
+  const center = side === "left" || side === "right" ? rect.cy : rect.cx;
+  if (side === "left" || side === "right") return false;
+  const yLo = side === "top" ? rect.y - 200 : rect.y + rect.h;
+  const yHi = side === "top" ? rect.y : rect.y + rect.h + 200;
+  const memberIds = new Set(members.map((m) => m.id));
+  return checked.some((edge) => {
+    if (memberIds.has(edge.id)) return false;
+    for (let i = 0; i < edge.path.length - 1; i += 1) {
+      const a = edge.path[i];
+      const b = edge.path[i + 1];
+      if (Math.abs(a.x - b.x) > EPS) continue;
+      if (Math.abs(a.x - center) > 2) continue;
+      const lo = Math.min(a.y, b.y);
+      const hi = Math.max(a.y, b.y);
+      if (hi > yLo && lo < yHi) return true;
+    }
+    return false;
+  });
+};
+
 bundles.forEach((byCoord, key) => {
-  const [nodeId, side] = key.split("|");
+  const [nodeId, side, kind] = key.split("|");
   const rect = rects.get(nodeId)!;
   const center = side === "left" || side === "right" ? rect.cy : rect.cx;
-  // S2-1: 単独接続は中央
-  if (byCoord.size === 1) {
+  // S2-1: 単独接続は中央(同じ辺の入出は合算で判定)
+  if (kind === "all" && byCoord.size === 1) {
     const [coord, members] = [...byCoord.entries()][0];
     if (Math.abs(coord - center) > EPS) {
       const detour = members.some(isSameLaneDetour);
       const msg = `[S2-1] ${nodeId} ${side}: 単独接続が中央にない (${coord} vs ${Math.round(center)}) edges=${members.map((m) => m.id).join(",")}`;
       if (detour) exceptions.push(`${msg} (E1: 同一レーン迂回)`);
+      else if (centerBlockedByOther(rect, side, members)) exceptions.push(`${msg} (E2: 中央列を他エッジが使用)`);
       else violations.push(msg);
     }
   }
-  // S2-2: decisionの上辺進入・下辺退出は中央
-  if (rect.type === "decision" && ((side === "top" && key.endsWith("in")) || (side === "bottom" && key.endsWith("out")))) {
+  // S2-2: decision・端点ノードの上辺進入・下辺退出は中央。側辺接続は不可
+  const centerOnly = rect.type === "decision" || rect.type === "start" || rect.type === "end";
+  if (centerOnly && ((side === "top" && key.endsWith("in")) || (side === "bottom" && key.endsWith("out")))) {
     byCoord.forEach((members, coord) => {
       if (Math.abs(coord - center) > EPS) {
         const detour = members.some(isSameLaneDetour);
-        const msg = `[S2-2] ${nodeId} ${side}: decision頂点から外れた接続 (${coord} vs ${Math.round(center)}) edges=${members.map((m) => m.id).join(",")}`;
+        const msg = `[S2-2] ${nodeId} ${side}: 中央から外れた接続 (${coord} vs ${Math.round(center)}) edges=${members.map((m) => m.id).join(",")}`;
         if (detour) exceptions.push(`${msg} (E1: 同一レーン迂回)`);
+        else if (centerBlockedByOther(rect, side, members)) exceptions.push(`${msg} (E2: 中央列を他エッジが使用)`);
         else violations.push(msg);
       }
+    });
+  }
+  if (centerOnly && (side === "left" || side === "right") && key.endsWith("in")) {
+    byCoord.forEach((members) => {
+      violations.push(`[S2-2] ${nodeId} ${side}: 中央限定ノードへの側辺進入 edges=${members.map((m) => m.id).join(",")}`);
     });
   }
 });
