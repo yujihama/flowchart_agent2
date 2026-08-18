@@ -277,25 +277,42 @@ type Routing = {
   gutterTracks: TrackAllocator;
 };
 
-type Approach = "left" | "right" | "center";
-
-/**
- * 到来方向に応じたアンカー候補の優先順(ANCHOR_PERCENTSのインデックス列)。
- * 左から来る線は左寄り、右からは右寄り、真上/真下は中央を優先することで
- * ノード直前の鉤形の曲がりと交差を減らす。
- */
-const TOP_ANCHOR_PREFERENCE: Record<Approach, readonly number[]> = {
-  center: [0, 3, 4, 1, 2, 5, 6],
-  left: [1, 5, 3, 0, 4, 2, 6],
-  right: [2, 6, 4, 0, 3, 1, 5],
-};
-
 type TopAnchor = { x: number; slot: number; index: number };
 
 type BottomPlan =
   | { kind: "aligned" }
   | { kind: "direct" }
   | { kind: "viaGutter"; gutterIndex: number; sameLane: boolean };
+
+/** 経路計画済みエッジ。1パス目(計画)の結果を保持し、2パス目(アンカー割当)と3パス目(構築)で使う */
+type PlannedEdge = {
+  flowEdge: FlowEdge;
+  source: PlacedNode;
+  target: PlacedNode;
+  isDecisionBranch: boolean;
+  shape:
+    | { kind: "bottom"; plan: BottomPlan; gutter?: GutterRun; decisionBottom: boolean }
+    | { kind: "sideTop"; side: Side; gutter: GutterRun; stubOffset: number; stubTrack: number }
+    | {
+        kind: "sideSide";
+        side: Side;
+        gutter: GutterRun;
+        stubOffset: number;
+        stubTrack: number;
+        entrySide: Side;
+        entryOffset: number;
+        entryTrack: number;
+      };
+};
+
+/** ノードの一辺(上辺/下辺)に接続する1本分または合流1束分のアンカー要求 */
+type AnchorGroup = {
+  approachX: number;
+  ideal: number;
+  avoidX?: number;
+  allowX: number[];
+  edgeIds: string[];
+};
 
 function routeEdges(model: FlowModel, placement: Placement): Routing {
   const corridorTracks = new TrackAllocator();
@@ -304,59 +321,122 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
 
   const laneCenterX = (laneIndex: number) => laneIndex * LANE_WIDTH + LANE_WIDTH / 2;
 
+  const nodeLeftX = (placed: PlacedNode) => laneCenterX(placed.laneIndex) - placed.width / 2;
+  const percentX = (placed: PlacedNode, percent: number) => nodeLeftX(placed) + placed.width * percent;
+
   // アンカーXは「コリドー(行間の帯) × X位置」単位で使用回数を管理する。
   // 同じ帯を縦に横切るスタブ同士(上のノードの出口と下のノードへの進入)が
   // 同じXを取ると重なるため、ノード単位ではなく帯単位で衝突を防ぐ。
   const anchorUseCount = new Map<string, number>();
-  const anchorKey = (corridorIndex: number, x: number) => `${corridorIndex}:${Math.round(x)}`;
-  const registerAnchor = (corridorIndex: number, x: number) => {
-    const key = anchorKey(corridorIndex, x);
+  const anchorKey = (band: number, x: number) => `${band}:${Math.round(x)}`;
+  const registerAnchor = (band: number, x: number) => {
+    const key = anchorKey(band, x);
     anchorUseCount.set(key, (anchorUseCount.get(key) ?? 0) + 1);
   };
+  const anchorUse = (band: number, x: number) => anchorUseCount.get(anchorKey(band, x)) ?? 0;
+
+  // ANCHOR_PERCENTSをX昇順に並べた候補(indexは元配列の位置=Excel接続点の並びに対応)
+  const percentCandidates = ANCHOR_PERCENTS.map((percent, index) => ({ percent, index })).sort(
+    (a, b) => a.percent - b.percent,
+  );
+  const centerFirstPercents = [0.5, 0.4, 0.6, 0.3, 0.7, 0.22, 0.78];
 
   /**
-   * 到来方向の優先順で帯内の空きアンカーを確保する。avoidX は同一レーン迂回時に
-   * 出口と同じXを避けるための除外値。全候補が使用済みの場合は使用回数が最少の
-   * 位置に相乗りし、特定の1点に集中しないようにする。
+   * ノードの一辺に接続するグループへアンカーXを一括で割り当てる。
+   * 1グループだけなら辺の中央を最優先する。複数なら到来X順を保ったまま、
+   * 各グループの理想位置(到来方向)との距離が最小になる組合せをDPで選ぶ。
+   * 帯内で他のエッジに使われたXは避けるが、自エッジの反対端が使うX
+   * (allowX: 直線を構成する出口位置)は共有可能として扱う。
    */
-  const allocateTopAnchor = (
-    placed: PlacedNode,
-    corridorIndex: number,
-    approach: Approach,
-    avoidX?: number,
-    firstChoiceIndex?: number,
-  ): TopAnchor => {
-    const leftX = laneCenterX(placed.laneIndex) - placed.width / 2;
-    const order =
-      firstChoiceIndex !== undefined
-        ? [firstChoiceIndex, ...TOP_ANCHOR_PREFERENCE[approach].filter((index) => index !== firstChoiceIndex)]
-        : [...TOP_ANCHOR_PREFERENCE[approach]];
-    const candidates = order.map((index) => ({ index, x: leftX + placed.width * ANCHOR_PERCENTS[index] }));
-    const usable =
-      avoidX === undefined ? candidates : candidates.filter((candidate) => Math.round(candidate.x) !== Math.round(avoidX));
-    const pool = usable.length > 0 ? usable : candidates;
-    const chosen =
-      pool.find((candidate) => !anchorUseCount.has(anchorKey(corridorIndex, candidate.x))) ??
-      pool.reduce((best, candidate) =>
-        (anchorUseCount.get(anchorKey(corridorIndex, candidate.x)) ?? 0) <
-        (anchorUseCount.get(anchorKey(corridorIndex, best.x)) ?? 0)
-          ? candidate
-          : best,
+  const assignAnchors = (placed: PlacedNode, band: number, groups: AnchorGroup[]): TopAnchor[] => {
+    const candidates = percentCandidates.map((candidate) => ({ ...candidate, x: percentX(placed, candidate.percent) }));
+    const blocked = (group: AnchorGroup, x: number) => {
+      if (group.avoidX !== undefined && Math.round(x) === Math.round(group.avoidX)) return true;
+      if (anchorUse(band, x) === 0) return false;
+      return !group.allowX.some((allow) => Math.round(allow) === Math.round(x));
+    };
+    const finalize = (candidate: { percent: number; index: number; x: number }): TopAnchor => {
+      registerAnchor(band, candidate.x);
+      return { x: candidate.x, slot: anchorPercentToSlot(ANCHOR_PERCENTS[candidate.index]), index: candidate.index };
+    };
+
+    if (groups.length === 1) {
+      const group = groups[0];
+      const ordered = centerFirstPercents.map((p) => candidates.find((candidate) => candidate.percent === p)!);
+      const pool = ordered.filter(
+        (candidate) => group.avoidX === undefined || Math.round(candidate.x) !== Math.round(group.avoidX),
       );
-    registerAnchor(corridorIndex, chosen.x);
-    return { x: chosen.x, slot: anchorPercentToSlot(ANCHOR_PERCENTS[chosen.index]), index: chosen.index };
+      const chosen =
+        pool.find((candidate) => !blocked(group, candidate.x)) ??
+        pool.reduce((best, candidate) => (anchorUse(band, candidate.x) < anchorUse(band, best.x) ? candidate : best));
+      return [finalize(chosen)];
+    }
+
+    // 複数グループ: 到来X順(groupsは呼び出し側でソート済み)を保つ順序保存マッチング
+    const INF = Number.POSITIVE_INFINITY;
+    const groupCost = (groupIndex: number, candidateIndex: number) => {
+      const group = groups[groupIndex];
+      const candidate = candidates[candidateIndex];
+      if (blocked(group, candidate.x)) return INF;
+      return Math.abs(group.ideal - candidate.percent) + 0.02 * Math.abs(candidate.percent - 0.5);
+    };
+    const n = groups.length;
+    const m = candidates.length;
+    if (n <= m) {
+      const dp: number[][] = Array.from({ length: n + 1 }, () => Array<number>(m + 1).fill(INF));
+      const take: boolean[][] = Array.from({ length: n + 1 }, () => Array<boolean>(m + 1).fill(false));
+      for (let j = 0; j <= m; j += 1) dp[0][j] = 0;
+      for (let i = 1; i <= n; i += 1) {
+        for (let j = 1; j <= m; j += 1) {
+          const skip = dp[i][j - 1];
+          const used = dp[i - 1][j - 1] + groupCost(i - 1, j - 1);
+          if (used < skip) {
+            dp[i][j] = used;
+            take[i][j] = true;
+          } else {
+            dp[i][j] = skip;
+          }
+        }
+      }
+      if (dp[n][m] < INF) {
+        const chosen: Array<{ percent: number; index: number; x: number }> = [];
+        let i = n;
+        let j = m;
+        while (i > 0) {
+          if (take[i][j]) {
+            chosen.unshift(candidates[j - 1]);
+            i -= 1;
+          }
+          j -= 1;
+        }
+        return chosen.map(finalize);
+      }
+    }
+
+    // フォールバック: 空きが足りない場合は理想位置に近い順で確保し、最後は相乗り
+    return groups.map((group) => {
+      const ordered = [...candidates].sort(
+        (a, b) => Math.abs(a.percent - group.ideal) - Math.abs(b.percent - group.ideal),
+      );
+      const pool = ordered.filter(
+        (candidate) => group.avoidX === undefined || Math.round(candidate.x) !== Math.round(group.avoidX),
+      );
+      const chosen =
+        pool.find((candidate) => !blocked(group, candidate.x)) ??
+        pool.reduce((best, candidate) => (anchorUse(band, candidate.x) < anchorUse(band, best.x) ? candidate : best));
+      return finalize(chosen);
+    });
   };
 
-  // 同一ターゲット・同一エッジ種の上辺進入は同じアンカーへ合流させる(トランク合流)。
-  // 各エッジは自分のコリドートラックから同じXで降りるため、進入直前で1本に見える。
-  const mergedEntryByKey = new Map<string, TopAnchor>();
-  const allocateTopEntry = (target: PlacedNode, edgeType: string, approach: Approach, avoidX?: number): TopAnchor => {
-    const key = `${target.node.id}|${edgeType}`;
-    const merged = mergedEntryByKey.get(key);
-    if (merged && (avoidX === undefined || Math.round(merged.x) !== Math.round(avoidX))) return merged;
-    const entry = allocateTopAnchor(target, target.row - 1, approach, avoidX);
-    if (!merged) mergedEntryByKey.set(key, entry);
-    return entry;
+  /** 到来Xからアンカーの理想位置(percent)を求める。decisionは頂点近くへ寄せる */
+  const idealPercent = (placed: PlacedNode, approachX: number, narrow: boolean) => {
+    const leftX = nodeLeftX(placed);
+    let percent: number;
+    if (approachX <= leftX) percent = 0.3;
+    else if (approachX >= leftX + placed.width) percent = 0.7;
+    else percent = Math.min(0.78, Math.max(0.22, (approachX - leftX) / placed.width));
+    if (narrow) percent = Math.min(0.6, Math.max(0.4, percent));
+    return percent;
   };
 
   // 同じ行から同じガターへ出る水平スタブ同士の重なりをYオフセットで避ける。
@@ -402,35 +482,11 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
     return { kind: "viaGutter", gutterIndex, sameLane };
   };
 
-  const exitApproachFor = (plan: BottomPlan, source: PlacedNode, target: PlacedNode): Approach => {
-    if (plan.kind === "viaGutter") {
-      return gutterCenterX(plan.gutterIndex) < laneCenterX(source.laneIndex) ? "left" : "right";
-    }
-    if (target.laneIndex === source.laneIndex) return "center";
-    return target.laneIndex < source.laneIndex ? "left" : "right";
-  };
-
-  const entryApproachFor = (plan: BottomPlan, exitX: number, target: PlacedNode): Approach => {
-    if (plan.kind === "viaGutter") {
-      return gutterCenterX(plan.gutterIndex) < laneCenterX(target.laneIndex) ? "left" : "right";
-    }
-    const targetCenter = laneCenterX(target.laneIndex);
-    if (Math.abs(exitX - targetCenter) < LANE_WIDTH / 4) return "center";
-    return exitX < targetCenter ? "left" : "right";
-  };
-
   // decisionノードの分岐エッジを先に振り分ける(左右の頂点と真下を使い分ける)
   const decisionExitSideByEdgeId = planDecisionExits(model, placement);
 
-  // decisionの真下出しはひし形頂点(レーン中央)固定なので、先に帯へ登録して
-  // 他ノードの進入スタブが同じXを取らないようにする
-  model.edges.forEach((edge) => {
-    if (decisionExitSideByEdgeId.get(edge.id) !== "bottom") return;
-    const source = placement.placedById.get(edge.from);
-    if (source) registerAnchor(source.row, laneCenterX(source.laneIndex));
-  });
-
-  const routedEdges: RoutedEdge[] = [];
+  // ---------- 1パス目: 経路計画(形状・ガター・スタブの確定) ----------
+  const planned: PlannedEdge[] = [];
 
   model.edges.forEach((flowEdge) => {
     const source = placement.placedById.get(flowEdge.from);
@@ -440,126 +496,258 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
     const isDecisionBranch = decisionExitSideByEdgeId.has(flowEdge.id);
     const decisionSide = decisionExitSideByEdgeId.get(flowEdge.id);
     const forward = target.row > source.row;
-    const edgeType = flowEdge.edge_type ?? "normal";
-
-    let route: EdgeRoute;
-    let sourceHandle: string;
-    let targetHandle: string;
-    let sourceAnchor: EdgeAnchorInfo;
-    let targetAnchor: EdgeAnchorInfo;
 
     if (forward && (decisionSide === "bottom" || !decisionSide)) {
       const plan = planBottomRoute(source, target);
-      // 同一レーンでガター迂回する経路は、始点と終点のXが一致すると迂回形状を
-      // Excelコネクタで表現できなくなるため、進入アンカーは出口Xを避けて確保する
-      let exit: TopAnchor;
-      let entry: TopAnchor;
-      if (decisionSide === "bottom") {
-        exit = { x: laneCenterX(source.laneIndex), slot: 0, index: 0 };
-        const avoidX = plan.kind === "viaGutter" && plan.sameLane ? exit.x : undefined;
-        entry = allocateTopEntry(target, edgeType, entryApproachFor(plan, exit.x, target), avoidX);
-      } else if (plan.kind === "aligned") {
-        // 同一レーンで途中セルが空: 進入位置に出口を揃えて直線を狙う
-        entry = allocateTopEntry(target, edgeType, "center");
-        exit = allocateTopAnchor(source, source.row, "center", undefined, entry.index);
-      } else {
-        exit = allocateTopAnchor(source, source.row, exitApproachFor(plan, source, target));
-        const avoidX = plan.kind === "viaGutter" && plan.sameLane ? exit.x : undefined;
-        entry = allocateTopEntry(target, edgeType, entryApproachFor(plan, exit.x, target), avoidX);
+      let gutter: GutterRun | undefined;
+      if (plan.kind === "viaGutter") {
+        const r1 = rowPos(source.row, ROW_CORRIDOR);
+        const r2 = rowPos(target.row - 1, ROW_CORRIDOR);
+        gutter = { gutter: plan.gutterIndex, r1, r2, track: gutterTracks.reserve(`${plan.gutterIndex}`, r1, r2) };
       }
-      route = buildBottomRoute(source, target, plan, corridorTracks, gutterTracks, exit, entry);
-      sourceHandle = `source-bottom-${exit.slot}`;
-      targetHandle = `target-top-${entry.slot}`;
-      sourceAnchor = { side: "bottom", slot: exit.index };
-      targetAnchor = { side: "top", slot: entry.index };
-    } else {
-      // 側面出し: decisionの左右分岐、または逆流(差戻し)・同一行エッジ
-      const side: Side =
-        decisionSide === "left" || decisionSide === "right"
-          ? decisionSide
-          : target.laneIndex < source.laneIndex
-            ? "left"
-            : target.laneIndex > source.laneIndex
-              ? "right"
-              : sameLaneBackwardSide(source.laneIndex);
-      const gutterIndex = side === "left" ? source.laneIndex : source.laneIndex + 1;
-      const stub = nextSideOffset(gutterIndex, source.row, source.height);
-
-      // ガターがターゲットレーンに隣接し、かつレーンが異なる場合は側辺へ直接進入する。
-      // 上辺への回り込みが消えて経路が大幅に短くなる。同一レーンは始点・終点のXが
-      // 一致してExcelコネクタで表現できないため対象外。decisionは頂点形状のため対象外。
-      const entrySide: Side | undefined =
-        gutterIndex === target.laneIndex ? "left" : gutterIndex === target.laneIndex + 1 ? "right" : undefined;
-      const canSideEnter =
-        entrySide !== undefined && source.laneIndex !== target.laneIndex && target.node.type !== "decision";
-
-      if (canSideEnter && entrySide !== undefined) {
-        const entryStub = nextSideOffset(gutterIndex, target.row, target.height);
-        const gutterTrack = gutterTracks.reserve(
-          `${gutterIndex}`,
-          rowPos(source.row, ROW_MID),
-          rowPos(target.row, ROW_MID),
-        );
-        route = {
-          kind: "sideExit",
-          side,
-          exitY: stub.offset,
-          gutter: {
-            gutter: gutterIndex,
-            r1: rowPos(source.row, ROW_MID),
-            r2: rowPos(target.row, ROW_MID),
-            track: gutterTrack,
-          },
-          entrySide,
-          entryY: entryStub.offset,
-        };
-        sourceHandle = `source-${side}-${Math.min(stub.track, 2)}`;
-        targetHandle = `target-${entrySide}-${Math.min(entryStub.track, 2)}`;
-        sourceAnchor = { side, slot: stub.track };
-        targetAnchor = { side: entrySide, slot: entryStub.track };
-      } else {
-        const corridorIndex = target.row - 1;
-        const entryApproach: Approach =
-          gutterCenterX(gutterIndex) < laneCenterX(target.laneIndex) ? "left" : "right";
-        const entry = allocateTopEntry(target, edgeType, entryApproach);
-        const gutterTrack = gutterTracks.reserve(
-          `${gutterIndex}`,
-          rowPos(source.row, ROW_MID),
-          rowPos(corridorIndex, ROW_CORRIDOR),
-        );
-        const corridorB = reserveCorridorRun(
-          corridorTracks,
-          corridorIndex,
-          gutterCenterX(gutterIndex),
-          entry.x,
-          gutterCenterX(gutterIndex),
-        );
-        route = {
-          kind: "sideExit",
-          side,
-          exitY: stub.offset,
-          entryX: entry.x,
-          gutter: { gutter: gutterIndex, r1: rowPos(source.row, ROW_MID), r2: rowPos(corridorIndex, ROW_CORRIDOR), track: gutterTrack },
-          corridorB,
-        };
-        sourceHandle = `source-${side}-${Math.min(stub.track, 2)}`;
-        targetHandle = `target-top-${entry.slot}`;
-        sourceAnchor = { side, slot: stub.track };
-        targetAnchor = { side: "top", slot: entry.index };
-      }
+      planned.push({
+        flowEdge,
+        source,
+        target,
+        isDecisionBranch,
+        shape: { kind: "bottom", plan, gutter, decisionBottom: decisionSide === "bottom" },
+      });
+      return;
     }
 
-    routedEdges.push({
+    // 側面出し: decisionの左右分岐、または逆流(差戻し)・同一行エッジ
+    const side: Side =
+      decisionSide === "left" || decisionSide === "right"
+        ? decisionSide
+        : target.laneIndex < source.laneIndex
+          ? "left"
+          : target.laneIndex > source.laneIndex
+            ? "right"
+            : sameLaneBackwardSide(source.laneIndex);
+    const gutterIndex = side === "left" ? source.laneIndex : source.laneIndex + 1;
+    const stub = nextSideOffset(gutterIndex, source.row, source.height);
+
+    // ガターがターゲットレーンに隣接し、かつレーンが異なる場合は側辺へ直接進入する。
+    // 上辺への回り込みが消えて経路が大幅に短くなる。同一レーンは始点・終点のXが
+    // 一致してExcelコネクタで表現できないため対象外。decisionは頂点形状のため対象外。
+    const entrySide: Side | undefined =
+      gutterIndex === target.laneIndex ? "left" : gutterIndex === target.laneIndex + 1 ? "right" : undefined;
+    const canSideEnter =
+      entrySide !== undefined && source.laneIndex !== target.laneIndex && target.node.type !== "decision";
+
+    if (canSideEnter && entrySide !== undefined) {
+      const entryStub = nextSideOffset(gutterIndex, target.row, target.height);
+      const r1 = rowPos(source.row, ROW_MID);
+      const r2 = rowPos(target.row, ROW_MID);
+      planned.push({
+        flowEdge,
+        source,
+        target,
+        isDecisionBranch,
+        shape: {
+          kind: "sideSide",
+          side,
+          gutter: { gutter: gutterIndex, r1, r2, track: gutterTracks.reserve(`${gutterIndex}`, r1, r2) },
+          stubOffset: stub.offset,
+          stubTrack: stub.track,
+          entrySide,
+          entryOffset: entryStub.offset,
+          entryTrack: entryStub.track,
+        },
+      });
+      return;
+    }
+
+    const r1 = rowPos(source.row, ROW_MID);
+    const r2 = rowPos(target.row - 1, ROW_CORRIDOR);
+    planned.push({
+      flowEdge,
+      source,
+      target,
+      isDecisionBranch,
+      shape: {
+        kind: "sideTop",
+        side,
+        gutter: { gutter: gutterIndex, r1, r2, track: gutterTracks.reserve(`${gutterIndex}`, r1, r2) },
+        stubOffset: stub.offset,
+        stubTrack: stub.track,
+      },
+    });
+  });
+
+  // ---------- 2パス目: アンカー割当(ノードの辺単位で一括決定) ----------
+  const nodeSortKey = (placed: PlacedNode) => placed.row * 100000 + placed.laneIndex * 100 + placed.node.type.length;
+
+  // decisionの真下出しはひし形頂点(レーン中央)固定なので、先に帯へ登録して
+  // 他ノードのスタブが同じXを取らないようにする
+  planned.forEach((p) => {
+    if (p.shape.kind === "bottom" && p.shape.decisionBottom) {
+      registerAnchor(p.source.row, laneCenterX(p.source.laneIndex));
+    }
+  });
+
+  // 下辺出口: ノードごとに接続要求を集め、1本なら中央・複数なら行き先方向順に割り当てる
+  const exitAnchorByEdgeId = new Map<string, TopAnchor>();
+  const exitPlansByNode = new Map<string, PlannedEdge[]>();
+  planned.forEach((p) => {
+    if (p.shape.kind !== "bottom" || p.shape.decisionBottom) return;
+    const list = exitPlansByNode.get(p.source.node.id) ?? [];
+    list.push(p);
+    exitPlansByNode.set(p.source.node.id, list);
+  });
+  [...exitPlansByNode.values()]
+    .sort((a, b) => nodeSortKey(a[0].source) - nodeSortKey(b[0].source))
+    .forEach((plans) => {
+      const requests = plans
+        .map((p) => {
+          const plan = (p.shape as { plan: BottomPlan }).plan;
+          const approachX =
+            plan.kind === "viaGutter" ? gutterCenterX(plan.gutterIndex) : laneCenterX(p.target.laneIndex);
+          return { p, approachX };
+        })
+        .sort((a, b) => a.approachX - b.approachX);
+      const groups: AnchorGroup[] = requests.map((request) => ({
+        approachX: request.approachX,
+        ideal: idealPercent(request.p.source, request.approachX, false),
+        allowX: [],
+        edgeIds: [request.p.flowEdge.id],
+      }));
+      const anchors = assignAnchors(plans[0].source, plans[0].source.row, groups);
+      requests.forEach((request, index) => exitAnchorByEdgeId.set(request.p.flowEdge.id, anchors[index]));
+    });
+
+  // 上辺進入: ターゲットごとに集約し、同一エッジ種は合流(トランク)として1アンカーを共有する。
+  // 自エッジの出口X(直進の縦線)は共有可能(allowX)、同一レーン迂回は出口Xを除外(avoidX)する。
+  const entryAnchorByEdgeId = new Map<string, TopAnchor>();
+  const entryGroupsByTarget = new Map<string, Map<string, AnchorGroup>>();
+  planned.forEach((p) => {
+    if (p.shape.kind === "sideSide") return;
+    const isDecisionTarget = p.target.node.type === "decision";
+    let approachX: number;
+    let avoidX: number | undefined;
+    const allowX: number[] = [];
+    if (p.shape.kind === "bottom") {
+      const plan = p.shape.plan;
+      const exitX = p.shape.decisionBottom
+        ? laneCenterX(p.source.laneIndex)
+        : exitAnchorByEdgeId.get(p.flowEdge.id)?.x;
+      if (plan.kind === "viaGutter") {
+        approachX = gutterCenterX(plan.gutterIndex);
+        if (plan.sameLane && exitX !== undefined) avoidX = exitX;
+      } else {
+        approachX = exitX ?? laneCenterX(p.source.laneIndex);
+        if (exitX !== undefined) allowX.push(exitX);
+      }
+    } else {
+      approachX = gutterCenterX(p.shape.gutter.gutter);
+    }
+    const edgeType = p.flowEdge.edge_type ?? "normal";
+    const key = avoidX !== undefined ? `detour|${p.flowEdge.id}` : `merge|${edgeType}`;
+    const byKey = entryGroupsByTarget.get(p.target.node.id) ?? new Map<string, AnchorGroup>();
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.edgeIds.push(p.flowEdge.id);
+      // 直進できるメンバー(出口Xを共有可能)がいる合流束は、その位置を理想とする。
+      // 横から来る線が束に加わってもメインフローの直線を崩さない。
+      if (allowX.length > 0 && existing.allowX.length === 0) {
+        existing.approachX = approachX;
+        existing.ideal = idealPercent(p.target, approachX, isDecisionTarget);
+      }
+      existing.allowX.push(...allowX);
+    } else {
+      byKey.set(key, {
+        approachX,
+        ideal: idealPercent(p.target, approachX, isDecisionTarget),
+        avoidX,
+        allowX,
+        edgeIds: [p.flowEdge.id],
+      });
+    }
+    entryGroupsByTarget.set(p.target.node.id, byKey);
+  });
+  [...entryGroupsByTarget.entries()]
+    .map(([targetId, byKey]) => ({ target: placement.placedById.get(targetId)!, groups: [...byKey.values()] }))
+    .sort((a, b) => nodeSortKey(a.target) - nodeSortKey(b.target))
+    .forEach(({ target, groups }) => {
+      const sorted = [...groups].sort((a, b) => a.approachX - b.approachX);
+      const anchors = assignAnchors(target, target.row - 1, sorted);
+      sorted.forEach((group, index) => {
+        group.edgeIds.forEach((edgeId) => entryAnchorByEdgeId.set(edgeId, anchors[index]));
+      });
+    });
+
+  // ---------- 3パス目: 経路の構築(コリドー予約は定義順で決定論的に行う) ----------
+  const routedEdges: RoutedEdge[] = planned.map((p) => {
+    const { flowEdge, source, target, isDecisionBranch } = p;
+
+    if (p.shape.kind === "bottom") {
+      const exit = p.shape.decisionBottom
+        ? { x: laneCenterX(source.laneIndex), slot: 0, index: 0 }
+        : exitAnchorByEdgeId.get(flowEdge.id)!;
+      const entry = entryAnchorByEdgeId.get(flowEdge.id)!;
+      const route = buildBottomRoute(source, target, p.shape.plan, p.shape.gutter, corridorTracks, exit, entry);
+      return {
+        edge: flowEdge,
+        source,
+        target,
+        route,
+        sourceHandle: `source-bottom-${exit.slot}`,
+        targetHandle: `target-top-${entry.slot}`,
+        sourceAnchor: { side: "bottom" as const, slot: exit.index },
+        targetAnchor: { side: "top" as const, slot: entry.index },
+        isDecisionBranch,
+      };
+    }
+
+    if (p.shape.kind === "sideSide") {
+      const shape = p.shape;
+      return {
+        edge: flowEdge,
+        source,
+        target,
+        route: {
+          kind: "sideExit" as const,
+          side: shape.side,
+          exitY: shape.stubOffset,
+          gutter: shape.gutter,
+          entrySide: shape.entrySide,
+          entryY: shape.entryOffset,
+        },
+        sourceHandle: `source-${shape.side}-${Math.min(shape.stubTrack, 2)}`,
+        targetHandle: `target-${shape.entrySide}-${Math.min(shape.entryTrack, 2)}`,
+        sourceAnchor: { side: shape.side, slot: shape.stubTrack },
+        targetAnchor: { side: shape.entrySide, slot: shape.entryTrack },
+        isDecisionBranch,
+      };
+    }
+
+    const shape = p.shape;
+    const entry = entryAnchorByEdgeId.get(flowEdge.id)!;
+    const corridorB = reserveCorridorRun(
+      corridorTracks,
+      target.row - 1,
+      gutterCenterX(shape.gutter.gutter),
+      entry.x,
+      gutterCenterX(shape.gutter.gutter),
+    );
+    return {
       edge: flowEdge,
       source,
       target,
-      route,
-      sourceHandle,
-      targetHandle,
-      sourceAnchor,
-      targetAnchor,
+      route: {
+        kind: "sideExit" as const,
+        side: shape.side,
+        exitY: shape.stubOffset,
+        entryX: entry.x,
+        gutter: shape.gutter,
+        corridorB,
+      },
+      sourceHandle: `source-${shape.side}-${Math.min(shape.stubTrack, 2)}`,
+      targetHandle: `target-top-${entry.slot}`,
+      sourceAnchor: { side: shape.side, slot: shape.stubTrack },
+      targetAnchor: { side: "top" as const, slot: entry.index },
       isDecisionBranch,
-    });
+    };
   });
 
   return { routedEdges, corridorTracks, gutterTracks };
@@ -601,8 +789,8 @@ function buildBottomRoute(
   source: PlacedNode,
   target: PlacedNode,
   plan: BottomPlan,
+  gutter: GutterRun | undefined,
   corridorTracks: TrackAllocator,
-  gutterTracks: TrackAllocator,
   exit: { x: number },
   entry: { x: number },
 ): EdgeRoute {
@@ -613,18 +801,13 @@ function buildBottomRoute(
   const corridorAIndex = source.row;
   const corridorBIndex = target.row - 1;
 
-  if (plan.kind !== "viaGutter" || corridorAIndex === corridorBIndex) {
+  if (plan.kind !== "viaGutter" || gutter === undefined || corridorAIndex === corridorBIndex) {
     const corridorA = reserveCorridorRun(corridorTracks, corridorAIndex, exit.x, entry.x);
     return { kind: "bottomExit", exitX: exit.x, entryX: entry.x, corridorA };
   }
 
   const gx = gutterCenterX(plan.gutterIndex);
   const corridorA = reserveCorridorRun(corridorTracks, corridorAIndex, exit.x, gx, gx);
-  const gutterTrack = gutterTracks.reserve(
-    `${plan.gutterIndex}`,
-    rowPos(corridorAIndex, ROW_CORRIDOR),
-    rowPos(corridorBIndex, ROW_CORRIDOR),
-  );
   const corridorB = reserveCorridorRun(corridorTracks, corridorBIndex, gx, entry.x, gx);
 
   return {
@@ -632,12 +815,7 @@ function buildBottomRoute(
     exitX: exit.x,
     entryX: entry.x,
     corridorA,
-    gutter: {
-      gutter: plan.gutterIndex,
-      r1: rowPos(corridorAIndex, ROW_CORRIDOR),
-      r2: rowPos(corridorBIndex, ROW_CORRIDOR),
-      track: gutterTrack,
-    },
+    gutter,
     corridorB,
   };
 }
