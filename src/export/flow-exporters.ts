@@ -189,7 +189,8 @@ function getExportBounds(nodes: ExportNode[], edges: ExportEdge[]) {
 }
 
 function marker(id: string, color: string) {
-  return `<marker id="${id}" markerWidth="12" markerHeight="12" viewBox="0 0 12 12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M 2 2 L 10 6 L 2 10 z" fill="${color}"/></marker>`;
+  // 線幅に依存しない固定サイズ(userSpaceOnUse)にして、太線のrollbackでも矢印を同じ大きさに保つ
+  return `<marker id="${id}" markerWidth="13" markerHeight="13" viewBox="0 0 12 12" refX="10" refY="6" orient="auto" markerUnits="userSpaceOnUse"><path d="M 2 2 L 10 6 L 2 10 z" fill="${color}"/></marker>`;
 }
 
 function svgToPngBlob(svg: string): Promise<Blob> {

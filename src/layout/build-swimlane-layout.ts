@@ -333,6 +333,8 @@ type PlannedEdge = {
 type AnchorRequest = {
   role: "up" | "down";
   ownerTag: string;
+  /** 合流束の種別(エッジ種)。異種同士のアンカー共有は最終手段としてコストを上げる */
+  mergeTag?: string;
   approachX: number;
   ideal: number;
   avoidX?: number;
@@ -670,11 +672,16 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
         if (used.has(c) && !shareable) continue;
         const candidate = candidates[c];
         if (blockedFor(group, candidate.x)) continue;
+        // 同種の合流は安価に、異種(色違い)の共有は交差回避の最終手段としてのみ許す
+        const sharePenalty = sharedWith.reduce(
+          (sum, gi) => sum + (groups[gi].mergeTag === group.mergeTag ? 5 : 250),
+          0,
+        );
         let cost =
           costSoFar +
           Math.abs(group.ideal - candidate.percent) +
           0.02 * Math.abs(candidate.percent - 0.5) +
-          (sharedWith.length > 0 ? 5 : 0) +
+          sharePenalty +
           1000 * bandCrossCount(group, candidate.x);
         for (let prev = 0; prev < groupIndex && cost < bestCost; prev += 1) {
           if (pick[prev] === c && groups[prev].ownerTag === group.ownerTag) continue; // 共有=合流なので交差なし
@@ -1116,6 +1123,7 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
       byKey.set(key, {
         role: "down",
         ownerTag: target.node.id,
+        mergeTag: edgeType,
         approachX,
         ideal,
         avoidX,
@@ -1872,7 +1880,8 @@ function emitReactFlow(
         sourceAnchor: routed.sourceAnchor,
         targetAnchor: routed.targetAnchor,
       },
-      markerEnd: { type: MarkerType.ArrowClosed, color },
+      // 矢印は線幅に依存させず固定サイズで統一する(rollback等の太線でも同じ大きさ)
+      markerEnd: { type: MarkerType.ArrowClosed, color, width: 24, height: 24, markerUnits: "userSpaceOnUse" },
       style: {
         stroke: color,
         strokeWidth: flowEdge.edge_type === "rollback" || flowEdge.edge_type === "exception" ? 2.4 : 2,
@@ -1881,7 +1890,99 @@ function emitReactFlow(
     };
   });
 
+  refineLabelPoints(
+    edges,
+    flowNodes.map((node) => ({
+      x: node.position.x,
+      y: node.position.y,
+      width: node.width ?? 0,
+      height: node.height ?? 0,
+    })),
+  );
+
   return { nodes: [...laneNodes, ...flowNodes], edges };
+}
+
+/**
+ * ラベル位置の調整。既定位置(分岐は頂点近く、その他は最長セグメント中点)を起点に、
+ * 他エッジの線・ノード・配置済みラベルと重ならない自経路上の候補を探して選ぶ。
+ * 全レンダラ(画面/SVG/Excel)が同じ labelPoint を使うため、ここで一度だけ調整する。
+ */
+function refineLabelPoints(
+  edges: Edge<FlowEdgeData>[],
+  nodeRects: Array<{ x: number; y: number; width: number; height: number }>,
+): void {
+  type Rect = { x1: number; y1: number; x2: number; y2: number };
+  const labelRect = (point: Point, text: string): Rect => {
+    let units = 0;
+    for (const ch of text) units += (ch.codePointAt(0) ?? 0) > 0xff ? 1 : 0.55;
+    const width = Math.max(24, units * 13 + 10);
+    const height = 18;
+    return { x1: point.x - width / 2, y1: point.y - height / 2, x2: point.x + width / 2, y2: point.y + height / 2 };
+  };
+  const segIntersectsRect = (a: Point, b: Point, rect: Rect) => {
+    const loX = Math.min(a.x, b.x);
+    const hiX = Math.max(a.x, b.x);
+    const loY = Math.min(a.y, b.y);
+    const hiY = Math.max(a.y, b.y);
+    return loX < rect.x2 && hiX > rect.x1 && loY < rect.y2 && hiY > rect.y1;
+  };
+  const rectsOverlap = (a: Rect, b: Rect) => a.x1 < b.x2 && a.x2 > b.x1 && a.y1 < b.y2 && a.y2 > b.y1;
+
+  const placedRects: Rect[] = [];
+  edges.forEach((edge) => {
+    const data = edge.data;
+    const text = edge.label ? String(edge.label) : "";
+    if (!data?.routePath?.length || !text) return;
+    const points = data.routePath;
+    const defaultPoint = data.labelPoint ?? { x: points[0].x, y: points[0].y };
+
+    const candidates: Point[] = [];
+    for (let index = 0; index < points.length - 1; index += 1) {
+      const a = points[index];
+      const b = points[index + 1];
+      const length = Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+      [0.5, 0.3, 0.7, 0.15, 0.85].forEach((t) => {
+        if (length * Math.min(t, 1 - t) < 16) return; // 端(コーナー・ノード際)に寄りすぎる候補は除外
+        candidates.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+      });
+    }
+
+    const costOf = (point: Point) => {
+      const rect = labelRect(point, text);
+      let total = 0;
+      edges.forEach((other) => {
+        if (other.id === edge.id) return;
+        const path = other.data?.routePath;
+        if (!path) return;
+        for (let index = 0; index < path.length - 1; index += 1) {
+          if (segIntersectsRect(path[index], path[index + 1], rect)) total += 30;
+        }
+      });
+      nodeRects.forEach((node) => {
+        if (rectsOverlap(rect, { x1: node.x, y1: node.y, x2: node.x + node.width, y2: node.y + node.height })) {
+          total += 60;
+        }
+      });
+      placedRects.forEach((placed) => {
+        if (rectsOverlap(rect, placed)) total += 40;
+      });
+      total += 0.01 * (Math.abs(point.x - defaultPoint.x) + Math.abs(point.y - defaultPoint.y));
+      return total;
+    };
+
+    let best = defaultPoint;
+    let bestCost = costOf(defaultPoint);
+    candidates.forEach((candidate) => {
+      const candidateCost = costOf(candidate);
+      if (candidateCost < bestCost - 1e-9) {
+        best = candidate;
+        bestCost = candidateCost;
+      }
+    });
+    data.labelPoint = best;
+    placedRects.push(labelRect(best, text));
+  });
 }
 
 function emitEdgeGeometry(routed: RoutedEdge, geometry: Geometry): { points: Point[]; labelPoint: Point } {
