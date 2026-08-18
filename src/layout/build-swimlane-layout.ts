@@ -191,8 +191,8 @@ function cellKey(laneIndex: number, row: number) {
 
 type Side = "left" | "right";
 
-/** コリドー k は行 k と行 k+1 の間の水平帯 */
-type CorridorRun = { corridor: number; x1: number; x2: number; track: number };
+/** コリドー k は行 k と行 k+1 の間の水平帯。lo/hi は予約時の余白込み区間 */
+type CorridorRun = { corridor: number; x1: number; x2: number; track: number; lo?: number; hi?: number };
 /** ガター g はレーン g-1 と g の境界の垂直帯。r1/r2 は行位置(row*1000+offset)で表す */
 type GutterRun = { gutter: number; r1: number; r2: number; track: number };
 
@@ -271,10 +271,13 @@ class TrackAllocator {
   }
 }
 
+/** ジオメトリ確定に必要なのはトラック数だけなので、並べ替え後の値を差し替えられるようにする */
+type TrackCounts = { trackCount(band: string): number };
+
 type Routing = {
   routedEdges: RoutedEdge[];
-  corridorTracks: TrackAllocator;
-  gutterTracks: TrackAllocator;
+  corridorTracks: TrackCounts;
+  gutterTracks: TrackCounts;
 };
 
 type TopAnchor = { x: number; slot: number; index: number };
@@ -292,48 +295,80 @@ type PlannedEdge = {
   isDecisionBranch: boolean;
   shape:
     | { kind: "bottom"; plan: BottomPlan; gutter?: GutterRun; decisionBottom: boolean }
-    | { kind: "sideTop"; side: Side; gutter: GutterRun; stubOffset: number; stubTrack: number }
+    | { kind: "sideTop"; side: Side; gutter: GutterRun; stubOffset: number; stubSlot: number }
     | {
         kind: "sideSide";
         side: Side;
         gutter: GutterRun;
         stubOffset: number;
-        stubTrack: number;
+        stubSlot: number;
         entrySide: Side;
         entryOffset: number;
-        entryTrack: number;
+        entrySlot: number;
       };
 };
 
-/** ノードの一辺(上辺/下辺)に接続する1本分または合流1束分のアンカー要求 */
-type AnchorGroup = {
+/**
+ * ノードの一辺(上辺/下辺)に接続する1本分または合流1束分のアンカー要求。
+ * role はコリドー帯内でそのXの上半分(up: 出口スタブ)と下半分(down: 進入降下)の
+ * どちらを使うか。ownerTag は同一トランク(down: ターゲットID)や自身(up: エッジID)の
+ * 再利用判定に使う。
+ */
+type AnchorRequest = {
+  role: "up" | "down";
+  ownerTag: string;
   approachX: number;
+  sideRank: number;
   ideal: number;
   avoidX?: number;
-  allowX: number[];
   edgeIds: string[];
 };
 
 function routeEdges(model: FlowModel, placement: Placement): Routing {
   const corridorTracks = new TrackAllocator();
   const gutterTracks = new TrackAllocator();
-  const stubTracks = new TrackAllocator();
 
   const laneCenterX = (laneIndex: number) => laneIndex * LANE_WIDTH + LANE_WIDTH / 2;
 
   const nodeLeftX = (placed: PlacedNode) => laneCenterX(placed.laneIndex) - placed.width / 2;
   const percentX = (placed: PlacedNode, percent: number) => nodeLeftX(placed) + placed.width * percent;
 
-  // アンカーXは「コリドー(行間の帯) × X位置」単位で使用回数を管理する。
-  // 同じ帯を縦に横切るスタブ同士(上のノードの出口と下のノードへの進入)が
-  // 同じXを取ると重なるため、ノード単位ではなく帯単位で衝突を防ぐ。
-  const anchorUseCount = new Map<string, number>();
-  const anchorKey = (band: number, x: number) => `${band}:${Math.round(x)}`;
-  const registerAnchor = (band: number, x: number) => {
-    const key = anchorKey(band, x);
-    anchorUseCount.set(key, (anchorUseCount.get(key) ?? 0) + 1);
+  // アンカーXは「コリドー(行間の帯) × X位置」単位で占有を管理する。
+  // 帯の各Xは上半分(up: 上の行からの出口スタブ)と下半分(down: 下の行への進入降下)を
+  // 別々のエッジが使える。同じXのup/downの上下関係は後段のコリドートラック
+  // 並べ替えが保証する。downは同一ターゲットへの合流(トランク)なら共有できる。
+  type RunSide = "left" | "right" | "none";
+  type Occupancy = { up?: string; upSide?: RunSide; down?: string };
+  const occupancyByKey = new Map<string, Occupancy>();
+  const occKey = (band: number, x: number) => `${band}:${Math.round(x)}`;
+  const occupy = (band: number, x: number, role: "up" | "down", ownerTag: string, upSide?: RunSide) => {
+    const occ = occupancyByKey.get(occKey(band, x)) ?? {};
+    if (role === "up") {
+      occ.up = occ.up ?? ownerTag;
+      occ.upSide = occ.upSide ?? upSide;
+    } else {
+      occ.down = occ.down ?? ownerTag;
+    }
+    occupancyByKey.set(occKey(band, x), occ);
   };
-  const anchorUse = (band: number, x: number) => anchorUseCount.get(anchorKey(band, x)) ?? 0;
+  // down は up と同一Xを共有できるが、両者の水平ランが同じ側へ伸びる場合は
+  // 上下順で交差を解消できない(トポロジカルに循環する)ため塞ぐ。
+  const isBlocked = (band: number, x: number, role: "up" | "down", ownerTag: string, runSide?: RunSide) => {
+    const occ = occupancyByKey.get(occKey(band, x));
+    if (!occ) return false;
+    if (role === "down") {
+      if (occ.down !== undefined && occ.down !== ownerTag) return true;
+      return (
+        occ.up !== undefined &&
+        occ.upSide !== undefined &&
+        occ.upSide !== "none" &&
+        runSide !== undefined &&
+        runSide !== "none" &&
+        runSide === occ.upSide
+      );
+    }
+    return occ.up !== undefined && occ.up !== ownerTag;
+  };
 
   // ANCHOR_PERCENTSをX昇順に並べた候補(indexは元配列の位置=Excel接続点の並びに対応)
   const percentCandidates = ANCHOR_PERCENTS.map((percent, index) => ({ percent, index })).sort(
@@ -343,20 +378,20 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
 
   /**
    * ノードの一辺に接続するグループへアンカーXを一括で割り当てる。
-   * 1グループだけなら辺の中央を最優先する。複数なら到来X順を保ったまま、
-   * 各グループの理想位置(到来方向)との距離が最小になる組合せをDPで選ぶ。
-   * 帯内で他のエッジに使われたXは避けるが、自エッジの反対端が使うX
-   * (allowX: 直線を構成する出口位置)は共有可能として扱う。
+   * 1グループだけなら辺の中央を最優先する。複数なら呼び出し側のソート順
+   * (到来サイド→ネスト順)を保ったまま、各グループの理想位置との距離が
+   * 最小になる組合せをDPで選ぶ。
    */
-  const assignAnchors = (placed: PlacedNode, band: number, groups: AnchorGroup[]): TopAnchor[] => {
+  const assignAnchors = (placed: PlacedNode, band: number, groups: AnchorRequest[]): TopAnchor[] => {
     const candidates = percentCandidates.map((candidate) => ({ ...candidate, x: percentX(placed, candidate.percent) }));
-    const blocked = (group: AnchorGroup, x: number) => {
+    const runSideAt = (group: AnchorRequest, x: number): "left" | "right" | "none" =>
+      group.approachX < x - 1 ? "left" : group.approachX > x + 1 ? "right" : "none";
+    const blockedFor = (group: AnchorRequest, x: number) => {
       if (group.avoidX !== undefined && Math.round(x) === Math.round(group.avoidX)) return true;
-      if (anchorUse(band, x) === 0) return false;
-      return !group.allowX.some((allow) => Math.round(allow) === Math.round(x));
+      return isBlocked(band, x, group.role, group.ownerTag, runSideAt(group, x));
     };
-    const finalize = (candidate: { percent: number; index: number; x: number }): TopAnchor => {
-      registerAnchor(band, candidate.x);
+    const finalize = (group: AnchorRequest, candidate: { percent: number; index: number; x: number }): TopAnchor => {
+      occupy(band, candidate.x, group.role, group.ownerTag, runSideAt(group, candidate.x));
       return { x: candidate.x, slot: anchorPercentToSlot(ANCHOR_PERCENTS[candidate.index]), index: candidate.index };
     };
 
@@ -366,18 +401,16 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
       const pool = ordered.filter(
         (candidate) => group.avoidX === undefined || Math.round(candidate.x) !== Math.round(group.avoidX),
       );
-      const chosen =
-        pool.find((candidate) => !blocked(group, candidate.x)) ??
-        pool.reduce((best, candidate) => (anchorUse(band, candidate.x) < anchorUse(band, best.x) ? candidate : best));
-      return [finalize(chosen)];
+      const chosen = pool.find((candidate) => !blockedFor(group, candidate.x)) ?? pool[0];
+      return [finalize(group, chosen)];
     }
 
-    // 複数グループ: 到来X順(groupsは呼び出し側でソート済み)を保つ順序保存マッチング
+    // 複数グループ: 呼び出し側のグループ順を保つ順序保存マッチング
     const INF = Number.POSITIVE_INFINITY;
     const groupCost = (groupIndex: number, candidateIndex: number) => {
       const group = groups[groupIndex];
       const candidate = candidates[candidateIndex];
-      if (blocked(group, candidate.x)) return INF;
+      if (blockedFor(group, candidate.x)) return INF;
       return Math.abs(group.ideal - candidate.percent) + 0.02 * Math.abs(candidate.percent - 0.5);
     };
     const n = groups.length;
@@ -409,7 +442,7 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
           }
           j -= 1;
         }
-        return chosen.map(finalize);
+        return chosen.map((candidate, index) => finalize(groups[index], candidate));
       }
     }
 
@@ -421,10 +454,8 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
       const pool = ordered.filter(
         (candidate) => group.avoidX === undefined || Math.round(candidate.x) !== Math.round(group.avoidX),
       );
-      const chosen =
-        pool.find((candidate) => !blocked(group, candidate.x)) ??
-        pool.reduce((best, candidate) => (anchorUse(band, candidate.x) < anchorUse(band, best.x) ? candidate : best));
-      return finalize(chosen);
+      const chosen = pool.find((candidate) => !blockedFor(group, candidate.x)) ?? pool[0];
+      return finalize(group, chosen);
     });
   };
 
@@ -439,17 +470,24 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
     return percent;
   };
 
-  // 同じ行から同じガターへ出る水平スタブ同士の重なりをYオフセットで避ける。
-  // 定義済みスロットを使い切ったら同じ間隔パターンで外側へ広げ、ノード高さに収める。
-  const sideOffsetForTrack = (track: number) => {
-    if (track < SIDE_ANCHOR_OFFSETS.length) return SIDE_ANCHOR_OFFSETS[track];
-    const magnitude = 11 * Math.ceil(track / 2);
-    return track % 2 === 1 ? -magnitude : magnitude;
+  /** k本のスタブに与える上→下順のYオフセット列(1本は中央、複数は11px間隔で中央対称) */
+  const stubOffsetsFor = (count: number): number[] => {
+    const offsets: number[] = [];
+    const half = Math.floor(count / 2);
+    if (count % 2 === 1) {
+      for (let k = -half; k <= half; k += 1) offsets.push(k * 11);
+    } else {
+      for (let k = -half; k <= half; k += 1) if (k !== 0) offsets.push(k * 11);
+    }
+    return offsets;
   };
-  const nextSideOffset = (gutterIndex: number, row: number, nodeHeight: number) => {
-    const track = stubTracks.reserve(`${gutterIndex}:${row}`, 0, 1);
-    const limit = Math.max(0, nodeHeight / 2 - 12);
-    return { offset: Math.max(-limit, Math.min(limit, sideOffsetForTrack(track))), track };
+  /** YオフセットをExcel接続点(SIDE_ANCHOR_OFFSETS)の最寄りスロットへ写す */
+  const slotForOffset = (offset: number) => {
+    let best = 0;
+    SIDE_ANCHOR_OFFSETS.forEach((value, index) => {
+      if (Math.abs(value - offset) < Math.abs(SIDE_ANCHOR_OFFSETS[best] - offset)) best = index;
+    });
+    return best;
   };
 
   // 迂回に使う左右ガターは混雑度(使用トラック数)で選ぶ。同点は従来の既定方向を保つ。
@@ -485,7 +523,7 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
   // decisionノードの分岐エッジを先に振り分ける(左右の頂点と真下を使い分ける)
   const decisionExitSideByEdgeId = planDecisionExits(model, placement);
 
-  // ---------- 1パス目: 経路計画(形状・ガター・スタブの確定) ----------
+  // ---------- 1パス目: 経路計画(形状とガターの確定) ----------
   const planned: PlannedEdge[] = [];
 
   model.edges.forEach((flowEdge) => {
@@ -525,18 +563,16 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
             ? "right"
             : sameLaneBackwardSide(source.laneIndex);
     const gutterIndex = side === "left" ? source.laneIndex : source.laneIndex + 1;
-    const stub = nextSideOffset(gutterIndex, source.row, source.height);
 
-    // ガターがターゲットレーンに隣接し、かつレーンが異なる場合は側辺へ直接進入する。
-    // 上辺への回り込みが消えて経路が大幅に短くなる。同一レーンは始点・終点のXが
-    // 一致してExcelコネクタで表現できないため対象外。decisionは頂点形状のため対象外。
+    // ガターがターゲットレーンに隣接し、かつレーンが異なる場合は側辺へ直接進入できる。
+    // 同一レーンは始点終点のXが一致しExcelコネクタで表現できないため対象外。
+    // decisionは頂点形状のため対象外。
     const entrySide: Side | undefined =
       gutterIndex === target.laneIndex ? "left" : gutterIndex === target.laneIndex + 1 ? "right" : undefined;
     const canSideEnter =
       entrySide !== undefined && source.laneIndex !== target.laneIndex && target.node.type !== "decision";
 
     if (canSideEnter && entrySide !== undefined) {
-      const entryStub = nextSideOffset(gutterIndex, target.row, target.height);
       const r1 = rowPos(source.row, ROW_MID);
       const r2 = rowPos(target.row, ROW_MID);
       planned.push({
@@ -548,11 +584,11 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
           kind: "sideSide",
           side,
           gutter: { gutter: gutterIndex, r1, r2, track: gutterTracks.reserve(`${gutterIndex}`, r1, r2) },
-          stubOffset: stub.offset,
-          stubTrack: stub.track,
+          stubOffset: 0,
+          stubSlot: 0,
           entrySide,
-          entryOffset: entryStub.offset,
-          entryTrack: entryStub.track,
+          entryOffset: 0,
+          entrySlot: 0,
         },
       });
       return;
@@ -569,24 +605,124 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
         kind: "sideTop",
         side,
         gutter: { gutter: gutterIndex, r1, r2, track: gutterTracks.reserve(`${gutterIndex}`, r1, r2) },
-        stubOffset: stub.offset,
-        stubTrack: stub.track,
+        stubOffset: 0,
+        stubSlot: 0,
       },
     });
   });
 
-  // ---------- 2パス目: アンカー割当(ノードの辺単位で一括決定) ----------
-  const nodeSortKey = (placed: PlacedNode) => placed.row * 100000 + placed.laneIndex * 100 + placed.node.type.length;
+  // ---------- 2パス目a: 側辺進入の降格判定 ----------
+  // 上から来る側辺進入は、ターゲット上辺の直前コリドーをガターで縦断する。
+  // そのコリドーを横切って上辺へ入る他エッジがあると必ず交差するため、
+  // その場合は側辺進入をやめて上辺進入(合流)へ降格する。
+  const topApproachesByTarget = new Map<string, number[]>();
+  const recordApproach = (targetId: string, x: number) => {
+    const list = topApproachesByTarget.get(targetId) ?? [];
+    list.push(x);
+    topApproachesByTarget.set(targetId, list);
+  };
+  const planApproachX = (p: PlannedEdge) =>
+    p.shape.kind === "bottom"
+      ? p.shape.plan.kind === "viaGutter"
+        ? gutterCenterX(p.shape.plan.gutterIndex)
+        : laneCenterX(p.source.laneIndex)
+      : gutterCenterX(p.shape.gutter.gutter);
+  planned.forEach((p) => {
+    if (p.shape.kind !== "sideSide") recordApproach(p.target.node.id, planApproachX(p));
+  });
+  for (let pass = 0; pass < 2; pass += 1) {
+    planned.forEach((p) => {
+      if (p.shape.kind !== "sideSide") return;
+      if (p.source.row >= p.target.row) return; // 下から上がる進入はコリドーを縦断しない
+      const gx = gutterCenterX(p.shape.gutter.gutter);
+      const fromLeft = p.shape.entrySide === "left";
+      const conflicts = (topApproachesByTarget.get(p.target.node.id) ?? []).some((ax) =>
+        fromLeft ? ax <= gx : ax >= gx,
+      );
+      if (!conflicts) return;
+      p.shape = {
+        kind: "sideTop",
+        side: p.shape.side,
+        gutter: { ...p.shape.gutter, r2: rowPos(p.target.row - 1, ROW_CORRIDOR) },
+        stubOffset: 0,
+        stubSlot: 0,
+      };
+      recordApproach(p.target.node.id, gx);
+    });
+  }
 
-  // decisionの真下出しはひし形頂点(レーン中央)固定なので、先に帯へ登録して
-  // 他ノードのスタブが同じXを取らないようにする
+  // ---------- 2パス目b: 側辺スタブのYオフセット割当 ----------
+  // ノードの辺ごとに集約し、1本なら中央。複数は「上へ続くもの(近い順)→
+  // 下へ続くもの(遠い順)」を上から並べる。ガターのトラック並べ替え
+  // (遠いスパンほど外側)と合わせて、スタブ同士の交差を防ぐ並びになる。
+  type StubRef = { p: PlannedEdge; kind: "exit" | "entry"; dir: "up" | "down"; dist: number; nodeHeight: number };
+  const stubsByNodeSide = new Map<string, StubRef[]>();
+  const addStub = (key: string, ref: StubRef) => {
+    const list = stubsByNodeSide.get(key) ?? [];
+    list.push(ref);
+    stubsByNodeSide.set(key, list);
+  };
+  planned.forEach((p) => {
+    const dist = Math.abs(p.target.row - p.source.row);
+    if (p.shape.kind === "sideTop") {
+      const dir: "up" | "down" = p.target.row - 1 >= p.source.row ? "down" : "up";
+      addStub(`${p.source.node.id}|${p.shape.side}`, { p, kind: "exit", dir, dist, nodeHeight: p.source.height });
+    } else if (p.shape.kind === "sideSide") {
+      addStub(`${p.source.node.id}|${p.shape.side}`, {
+        p,
+        kind: "exit",
+        dir: p.target.row < p.source.row ? "up" : "down",
+        dist,
+        nodeHeight: p.source.height,
+      });
+      addStub(`${p.target.node.id}|${p.shape.entrySide}`, {
+        p,
+        kind: "entry",
+        dir: p.source.row < p.target.row ? "up" : "down",
+        dist,
+        nodeHeight: p.target.height,
+      });
+    }
+  });
+  stubsByNodeSide.forEach((members) => {
+    const sorted = [...members].sort((a, b) => {
+      if (a.dir !== b.dir) return a.dir === "up" ? -1 : 1;
+      return a.dir === "up" ? a.dist - b.dist : b.dist - a.dist;
+    });
+    const offsets = stubOffsetsFor(sorted.length);
+    sorted.forEach((member, index) => {
+      const limit = Math.max(0, member.nodeHeight / 2 - 12);
+      const offset = Math.max(-limit, Math.min(limit, offsets[index]));
+      const slot = slotForOffset(offset);
+      if (member.kind === "exit") {
+        const shape = member.p.shape as { stubOffset: number; stubSlot: number };
+        shape.stubOffset = offset;
+        shape.stubSlot = slot;
+      } else {
+        const shape = member.p.shape as { entryOffset: number; entrySlot: number };
+        shape.entryOffset = offset;
+        shape.entrySlot = slot;
+      }
+    });
+  });
+
+  // ---------- 2パス目c: アンカー割当 ----------
+  const nodeSortKey = (placed: PlacedNode) => placed.row * 100000 + placed.laneIndex * 100;
+
+  // decisionの真下出しはひし形頂点(レーン中央)固定なので先に占有する
   planned.forEach((p) => {
     if (p.shape.kind === "bottom" && p.shape.decisionBottom) {
-      registerAnchor(p.source.row, laneCenterX(p.source.laneIndex));
+      const center = laneCenterX(p.source.laneIndex);
+      const towardX =
+        p.shape.plan.kind === "viaGutter" ? gutterCenterX(p.shape.plan.gutterIndex) : laneCenterX(p.target.laneIndex);
+      const upSide: "left" | "right" | "none" = towardX < center - 1 ? "left" : towardX > center + 1 ? "right" : "none";
+      occupy(p.source.row, center, "up", `decision-bottom|${p.flowEdge.id}`, upSide);
     }
   });
 
-  // 下辺出口: ノードごとに接続要求を集め、1本なら中央・複数なら行き先方向順に割り当てる
+  // 下辺出口: ノードごとに集め、1本なら中央・複数なら行き先方向順に割り当てる。
+  // 同一レーン迂回でdecisionへ入るエッジは進入が頂点(中央)を使うため、
+  // 出口側が中央を譲る(S2-2をS2-1に優先)。
   const exitAnchorByEdgeId = new Map<string, TopAnchor>();
   const exitPlansByNode = new Map<string, PlannedEdge[]>();
   planned.forEach((p) => {
@@ -603,29 +739,37 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
           const plan = (p.shape as { plan: BottomPlan }).plan;
           const approachX =
             plan.kind === "viaGutter" ? gutterCenterX(plan.gutterIndex) : laneCenterX(p.target.laneIndex);
-          return { p, approachX };
+          const detourToDecision = plan.kind === "viaGutter" && plan.sameLane && p.target.node.type === "decision";
+          return { p, approachX, detourToDecision };
         })
         .sort((a, b) => a.approachX - b.approachX);
-      const groups: AnchorGroup[] = requests.map((request) => ({
+      const groups: AnchorRequest[] = requests.map((request) => ({
+        role: "up" as const,
+        ownerTag: request.p.flowEdge.id,
         approachX: request.approachX,
+        sideRank: 1,
         ideal: idealPercent(request.p.source, request.approachX, false),
-        allowX: [],
+        avoidX: request.detourToDecision ? laneCenterX(request.p.source.laneIndex) : undefined,
         edgeIds: [request.p.flowEdge.id],
       }));
       const anchors = assignAnchors(plans[0].source, plans[0].source.row, groups);
       requests.forEach((request, index) => exitAnchorByEdgeId.set(request.p.flowEdge.id, anchors[index]));
     });
 
-  // 上辺進入: ターゲットごとに集約し、同一エッジ種は合流(トランク)として1アンカーを共有する。
-  // 自エッジの出口X(直進の縦線)は共有可能(allowX)、同一レーン迂回は出口Xを除外(avoidX)する。
+  // 上辺進入: ターゲットごとに集約する。decisionへの進入は種類を問わず1束として
+  // 頂点(中央)へ合流させる。その他は同一エッジ種で合流し、同じ側から複数束が
+  // 来る場合は「近い束ほど手前(内側)・遠い束ほど外側」のネスト順で並べて
+  // 交差を防ぐ(コリドートラックの並べ替えと対になる)。
   const entryAnchorByEdgeId = new Map<string, TopAnchor>();
-  const entryGroupsByTarget = new Map<string, Map<string, AnchorGroup>>();
+  type EntryGroup = AnchorRequest & { alignedLock: boolean };
+  const entryGroupsByTarget = new Map<string, Map<string, EntryGroup>>();
   planned.forEach((p) => {
     if (p.shape.kind === "sideSide") return;
-    const isDecisionTarget = p.target.node.type === "decision";
+    const target = p.target;
+    const isDecisionTarget = target.node.type === "decision";
     let approachX: number;
     let avoidX: number | undefined;
-    const allowX: number[] = [];
+    let aligned = false;
     if (p.shape.kind === "bottom") {
       const plan = p.shape.plan;
       const exitX = p.shape.decisionBottom
@@ -633,46 +777,69 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
         : exitAnchorByEdgeId.get(p.flowEdge.id)?.x;
       if (plan.kind === "viaGutter") {
         approachX = gutterCenterX(plan.gutterIndex);
-        if (plan.sameLane && exitX !== undefined) avoidX = exitX;
+        if (plan.sameLane && !isDecisionTarget && exitX !== undefined) avoidX = exitX;
       } else {
         approachX = exitX ?? laneCenterX(p.source.laneIndex);
-        if (exitX !== undefined) allowX.push(exitX);
+        aligned = true;
       }
     } else {
       approachX = gutterCenterX(p.shape.gutter.gutter);
     }
     const edgeType = p.flowEdge.edge_type ?? "normal";
-    const key = avoidX !== undefined ? `detour|${p.flowEdge.id}` : `merge|${edgeType}`;
-    const byKey = entryGroupsByTarget.get(p.target.node.id) ?? new Map<string, AnchorGroup>();
+    const key = isDecisionTarget ? "decision" : avoidX !== undefined ? `detour|${p.flowEdge.id}` : `merge|${edgeType}`;
+    const leftX = nodeLeftX(target);
+    const sideRank = approachX < leftX ? 0 : approachX > leftX + target.width ? 2 : 1;
+    const ideal = isDecisionTarget ? 0.5 : idealPercent(target, approachX, false);
+    const byKey = entryGroupsByTarget.get(target.node.id) ?? new Map<string, EntryGroup>();
     const existing = byKey.get(key);
     if (existing) {
       existing.edgeIds.push(p.flowEdge.id);
-      // 直進できるメンバー(出口Xを共有可能)がいる合流束は、その位置を理想とする。
-      // 横から来る線が束に加わってもメインフローの直線を崩さない。
-      if (allowX.length > 0 && existing.allowX.length === 0) {
+      // 直進できるメンバーがいる合流束はその位置を理想とし、メインフローの直線を守る
+      if (aligned && !existing.alignedLock) {
         existing.approachX = approachX;
-        existing.ideal = idealPercent(p.target, approachX, isDecisionTarget);
+        existing.sideRank = sideRank;
+        existing.ideal = ideal;
+        existing.alignedLock = true;
       }
-      existing.allowX.push(...allowX);
     } else {
       byKey.set(key, {
+        role: "down",
+        ownerTag: target.node.id,
         approachX,
-        ideal: idealPercent(p.target, approachX, isDecisionTarget),
+        sideRank,
+        ideal,
         avoidX,
-        allowX,
         edgeIds: [p.flowEdge.id],
+        alignedLock: aligned,
       });
     }
-    entryGroupsByTarget.set(p.target.node.id, byKey);
+    entryGroupsByTarget.set(target.node.id, byKey);
   });
+  const plannedById = new Map(planned.map((p) => [p.flowEdge.id, p]));
   [...entryGroupsByTarget.entries()]
     .map(([targetId, byKey]) => ({ target: placement.placedById.get(targetId)!, groups: [...byKey.values()] }))
     .sort((a, b) => nodeSortKey(a.target) - nodeSortKey(b.target))
     .forEach(({ target, groups }) => {
-      const sorted = [...groups].sort((a, b) => a.approachX - b.approachX);
+      const sorted = [...groups].sort((a, b) => {
+        if (a.sideRank !== b.sideRank) return a.sideRank - b.sideRank;
+        return a.sideRank === 1 ? a.approachX - b.approachX : b.approachX - a.approachX;
+      });
       const anchors = assignAnchors(target, target.row - 1, sorted);
       sorted.forEach((group, index) => {
         group.edgeIds.forEach((edgeId) => entryAnchorByEdgeId.set(edgeId, anchors[index]));
+      });
+      // 直進(aligned)エッジの縦断列を占有し、途中コリドーで他エッジが同じXを取らないようにする
+      sorted.forEach((group, index) => {
+        const anchor = anchors[index];
+        group.edgeIds.forEach((edgeId) => {
+          const p = plannedById.get(edgeId);
+          if (!p || p.shape.kind !== "bottom" || p.shape.plan.kind !== "aligned") return;
+          occupy(p.source.row, anchor.x, "down", target.node.id);
+          for (let band = p.source.row + 1; band <= p.target.row - 1; band += 1) {
+            occupy(band, anchor.x, "up", `pass|${edgeId}`);
+            occupy(band, anchor.x, "down", target.node.id);
+          }
+        });
       });
     });
 
@@ -713,10 +880,10 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
           entrySide: shape.entrySide,
           entryY: shape.entryOffset,
         },
-        sourceHandle: `source-${shape.side}-${Math.min(shape.stubTrack, 2)}`,
-        targetHandle: `target-${shape.entrySide}-${Math.min(shape.entryTrack, 2)}`,
-        sourceAnchor: { side: shape.side, slot: shape.stubTrack },
-        targetAnchor: { side: shape.entrySide, slot: shape.entryTrack },
+        sourceHandle: `source-${shape.side}-${Math.min(shape.stubSlot, 2)}`,
+        targetHandle: `target-${shape.entrySide}-${Math.min(shape.entrySlot, 2)}`,
+        sourceAnchor: { side: shape.side, slot: shape.stubSlot },
+        targetAnchor: { side: shape.entrySide, slot: shape.entrySlot },
         isDecisionBranch,
       };
     }
@@ -742,15 +909,163 @@ function routeEdges(model: FlowModel, placement: Placement): Routing {
         gutter: shape.gutter,
         corridorB,
       },
-      sourceHandle: `source-${shape.side}-${Math.min(shape.stubTrack, 2)}`,
+      sourceHandle: `source-${shape.side}-${Math.min(shape.stubSlot, 2)}`,
       targetHandle: `target-top-${entry.slot}`,
-      sourceAnchor: { side: shape.side, slot: shape.stubTrack },
+      sourceAnchor: { side: shape.side, slot: shape.stubSlot },
       targetAnchor: { side: "top" as const, slot: entry.index },
       isDecisionBranch,
     };
   });
 
-  return { routedEdges, corridorTracks, gutterTracks };
+  // ---------- 3パス目b: ガタートラックの並べ替え ----------
+  // 境界ガター(盤面端)は長いスパンほど外側に置くネスト構造にする。
+  // 内部ガターは境界線の左右どちらを使うかを「行レベルのスタブが付く側
+  // (側面出し・側辺進入)/最終的に曲がる側(下辺出し)」で意味的に決め、
+  // 同じ側の中では長いスパンを内側(境界寄り)に詰める。これにより
+  // 別レーンのスタブや折り返し水平線がガター縦断線を横切らない。
+  type GutterRunRef = { run: GutterRun; side: Side };
+  const runsByGutter = new Map<string, GutterRunRef[]>();
+  const addGutterRun = (run: GutterRun | undefined, side: Side) => {
+    if (!run) return;
+    const list = runsByGutter.get(`${run.gutter}`) ?? [];
+    list.push({ run, side });
+    runsByGutter.set(`${run.gutter}`, list);
+  };
+  routedEdges.forEach((routed) => {
+    const route = routed.route;
+    if (route.kind === "bottomExit") {
+      if (route.gutter) {
+        addGutterRun(route.gutter, route.entryX < gutterCenterX(route.gutter.gutter) ? "left" : "right");
+      }
+    } else if (route.kind === "sideExit") {
+      // ソースがガターのどちら側にいるか = スタブが付く側
+      addGutterRun(route.gutter, route.side === "left" ? "right" : "left");
+    }
+  });
+  const repackedGutters = new TrackAllocator();
+  runsByGutter.forEach((refs, band) => {
+    const gutterIndex = refs[0].run.gutter;
+    const isBoundary = gutterIndex === 0 || gutterIndex === placement.laneCount;
+    if (isBoundary) {
+      [...refs]
+        .sort((a, b) => Math.abs(b.run.r2 - b.run.r1) - Math.abs(a.run.r2 - a.run.r1))
+        .forEach((ref) => {
+          ref.run.track = repackedGutters.reserve(band, ref.run.r1, ref.run.r2);
+        });
+      return;
+    }
+    (["right", "left"] as const).forEach((side) => {
+      [...refs]
+        .filter((ref) => ref.side === side)
+        .sort((a, b) => Math.abs(b.run.r2 - b.run.r1) - Math.abs(a.run.r2 - a.run.r1))
+        .forEach((ref) => {
+          const local = repackedGutters.reserve(`${band}|${side}`, ref.run.r1, ref.run.r2);
+          ref.run.track = side === "right" ? local * 2 : local * 2 + 1;
+        });
+    });
+  });
+  const gutterX = (run: GutterRun) => gutterTrackXFor(run, placement.laneCount);
+
+  // ---------- 3パス目c: コリドートラックの並べ替え(交差回避の制約充足) ----------
+  // 各コリドーについて「down接続(帯の下へ降りる縦線)がXを通るランは上へ」
+  // 「up接続(帯の上から降りてくる縦線)がXを通るランは下へ」「同一Xのup/downは
+  // upが上」という制約を満たすトラック順を求め、その順で区間を詰め直す。
+  // 接続点Xとラン区間はガターの実トラックX(並べ替え後)を使う。
+  type CorridorAttachment = { x: number; dir: "up" | "down" };
+  type CorridorRunInfo = { run: CorridorRun; atts: CorridorAttachment[]; ex1: number; ex2: number; order: number };
+  const runsByCorridor = new Map<string, CorridorRunInfo[]>();
+  let runOrder = 0;
+  const addRunInfo = (run: CorridorRun | undefined, ex1: number, ex2: number, atts: CorridorAttachment[]) => {
+    if (!run) return;
+    const list = runsByCorridor.get(`${run.corridor}`) ?? [];
+    list.push({ run, atts, ex1, ex2, order: runOrder });
+    runOrder += 1;
+    runsByCorridor.set(`${run.corridor}`, list);
+  };
+  routedEdges.forEach((routed) => {
+    const route = routed.route;
+    if (route.kind === "bottomExit") {
+      const gx = route.gutter ? gutterX(route.gutter) : undefined;
+      const downX = gx ?? route.entryX;
+      addRunInfo(route.corridorA, route.exitX, downX, [
+        { x: route.exitX, dir: "up" },
+        { x: downX, dir: "down" },
+      ]);
+      if (route.corridorB && gx !== undefined) {
+        addRunInfo(route.corridorB, gx, route.entryX, [
+          { x: gx, dir: "up" },
+          { x: route.entryX, dir: "down" },
+        ]);
+      }
+    } else if (route.kind === "sideExit" && route.corridorB && route.entryX !== undefined) {
+      const gx = gutterX(route.gutter);
+      const gutterFromAbove = routed.source.row <= routed.target.row - 1;
+      addRunInfo(route.corridorB, gx, route.entryX, [
+        { x: gx, dir: gutterFromAbove ? "up" : "down" },
+        { x: route.entryX, dir: "down" },
+      ]);
+    }
+  });
+  const corridorCounts = new Map<string, number>();
+  runsByCorridor.forEach((runs, band) => {
+    const n = runs.length;
+    const mustBeAbove: Array<Set<number>> = Array.from({ length: n }, () => new Set<number>());
+    for (let i = 0; i < n; i += 1) {
+      for (let j = 0; j < n; j += 1) {
+        if (i === j) continue;
+        const lo = Math.min(runs[j].ex1, runs[j].ex2);
+        const hi = Math.max(runs[j].ex1, runs[j].ex2);
+        runs[i].atts.forEach((att) => {
+          const inside = att.x > lo + 1 && att.x < hi - 1;
+          if (inside) {
+            if (att.dir === "down") mustBeAbove[i].add(j);
+            else mustBeAbove[j].add(i);
+          } else if (
+            att.dir === "up" &&
+            runs[j].atts.some((other) => other.dir === "down" && Math.round(other.x) === Math.round(att.x))
+          ) {
+            mustBeAbove[j].add(i);
+          }
+        });
+      }
+    }
+    const pending = new Set<number>(runs.keys());
+    const pickedOrder: number[] = [];
+    while (pending.size > 0) {
+      const ready = [...pending].filter((i) => [...mustBeAbove[i]].every((j) => !pending.has(j)));
+      const pool = ready.length > 0 ? ready : [...pending];
+      const pick = pool.sort((a, b) => runs[a].order - runs[b].order)[0];
+      pending.delete(pick);
+      pickedOrder.push(pick);
+    }
+    const trackOf = new Map<number, number>();
+    const intervalsByTrack: Array<Array<{ lo: number; hi: number }>> = [];
+    pickedOrder.forEach((i) => {
+      const info = runs[i];
+      const lo = Math.min(info.ex1, info.ex2, info.run.lo ?? Number.POSITIVE_INFINITY) - 4;
+      const hi = Math.max(info.ex1, info.ex2, info.run.hi ?? Number.NEGATIVE_INFINITY) + 4;
+      let track = 0;
+      mustBeAbove[i].forEach((j) => {
+        const above = trackOf.get(j);
+        if (above !== undefined) track = Math.max(track, above + 1);
+      });
+      for (;;) {
+        const occupied = intervalsByTrack[track] ?? [];
+        if (occupied.every((iv) => hi <= iv.lo || lo >= iv.hi)) break;
+        track += 1;
+      }
+      (intervalsByTrack[track] = intervalsByTrack[track] ?? []).push({ lo, hi });
+      trackOf.set(i, track);
+      info.run.track = track;
+    });
+    corridorCounts.set(band, intervalsByTrack.length);
+  });
+
+  const corridorTrackCounts: TrackCounts = {
+    trackCount: (band: string) => corridorCounts.get(band) ?? 0,
+  };
+
+  return { routedEdges, corridorTracks: corridorTrackCounts, gutterTracks: repackedGutters };
 }
 
 /**
@@ -771,11 +1086,30 @@ function reserveCorridorRun(
     hi = Math.max(hi, gutterEndpointX + LANE_SIDE_REGION);
   }
   const track = allocator.reserve(`${corridor}`, lo, hi);
-  return { corridor, x1, x2, track };
+  return { corridor, x1, x2, track, lo: lo - 4, hi: hi + 4 };
 }
 
 function gutterCenterX(gutterIndex: number) {
   return gutterIndex * LANE_WIDTH;
+}
+
+/** ガターランの実X座標。境界ガターは盤面内側のみ、内部ガターは境界線の左右交互に使う */
+function gutterTrackXFor(run: GutterRun, laneCount: number) {
+  const center = run.gutter * LANE_WIDTH;
+  const isLeftBoundary = run.gutter === 0;
+  const isRightBoundary = run.gutter === laneCount;
+  const maxOffset = LANE_SIDE_REGION - GUTTER_EDGE_MARGIN;
+  let offset: number;
+  if (isLeftBoundary) {
+    offset = GUTTER_EDGE_MARGIN + run.track * GUTTER_TRACK_SPACING;
+  } else if (isRightBoundary) {
+    offset = -(GUTTER_EDGE_MARGIN + run.track * GUTTER_TRACK_SPACING);
+  } else {
+    const magnitude = Math.ceil((run.track + 1) / 2) * GUTTER_TRACK_SPACING;
+    offset = run.track % 2 === 0 ? magnitude - GUTTER_TRACK_SPACING / 2 : -(magnitude - GUTTER_TRACK_SPACING / 2);
+  }
+  const clamped = Math.max(-maxOffset * 2 + GUTTER_EDGE_MARGIN, Math.min(maxOffset * 2 - GUTTER_EDGE_MARGIN, offset));
+  return center + clamped;
 }
 
 /**
@@ -903,8 +1237,10 @@ function planDecisionExits(model: FlowModel, placement: Placement) {
 }
 
 /**
- * 左右いずれかの頂点に前進分岐が2本以上集中する場合、その中の主要な1本
- * (normal優先 → 近い行優先 → 定義順)を真下出しに割り当てる。
+ * 左右いずれかの頂点に前進分岐が2本以上集中する場合、その中の1本を真下出しに逃がす。
+ * 最も遠い行へ向かう分岐を選ぶ: 真下出しは「コリドー→ターゲット側ガター」の
+ * 外回り経路になるため、遠い分岐を外側・近い分岐(頂点出し)を内側とする
+ * ネスト構造となり、兄弟分岐同士の交差を避けられる。
  */
 function pickBottomReliefEdgeId(edges: FlowEdge[], placement: Placement, source: PlacedNode) {
   const groups: Record<Side, FlowEdge[]> = { left: [], right: [] };
@@ -920,10 +1256,7 @@ function pickBottomReliefEdgeId(edges: FlowEdge[], placement: Placement, source:
 
   const edgeIndexById = new Map(edges.map((edge, index) => [edge.id, index]));
   const ranked = [...crowded].sort((a, b) => {
-    const aExceptional = a.edge_type && a.edge_type !== "normal" ? 1 : 0;
-    const bExceptional = b.edge_type && b.edge_type !== "normal" ? 1 : 0;
-    if (aExceptional !== bExceptional) return aExceptional - bExceptional;
-    const rowDiff = (placement.placedById.get(a.to)?.row ?? 0) - (placement.placedById.get(b.to)?.row ?? 0);
+    const rowDiff = (placement.placedById.get(b.to)?.row ?? 0) - (placement.placedById.get(a.to)?.row ?? 0);
     if (rowDiff !== 0) return rowDiff;
     return (edgeIndexById.get(a.id) ?? 0) - (edgeIndexById.get(b.id) ?? 0);
   });
@@ -981,24 +1314,7 @@ function resolveGeometry(placement: Placement, routing: Routing): Geometry {
     return top + (height * (run.track + 1)) / (tracks + 1);
   };
 
-  const gutterTrackX = (run: GutterRun) => {
-    const center = run.gutter * LANE_WIDTH;
-    const isLeftBoundary = run.gutter === 0;
-    const isRightBoundary = run.gutter === placement.laneCount;
-    const maxOffset = LANE_SIDE_REGION - GUTTER_EDGE_MARGIN;
-    // 境界ガターは盤面内側のみ、内部ガターは境界線の左右交互に使う
-    let offset: number;
-    if (isLeftBoundary) {
-      offset = GUTTER_EDGE_MARGIN + run.track * GUTTER_TRACK_SPACING;
-    } else if (isRightBoundary) {
-      offset = -(GUTTER_EDGE_MARGIN + run.track * GUTTER_TRACK_SPACING);
-    } else {
-      const magnitude = Math.ceil((run.track + 1) / 2) * GUTTER_TRACK_SPACING;
-      offset = run.track % 2 === 0 ? magnitude - GUTTER_TRACK_SPACING / 2 : -(magnitude - GUTTER_TRACK_SPACING / 2);
-    }
-    const clamped = Math.max(-maxOffset * 2 + GUTTER_EDGE_MARGIN, Math.min(maxOffset * 2 - GUTTER_EDGE_MARGIN, offset));
-    return center + clamped;
-  };
+  const gutterTrackX = (run: GutterRun) => gutterTrackXFor(run, placement.laneCount);
 
   const nodeRect = (placed: PlacedNode) => {
     const laneX = placed.laneIndex * LANE_WIDTH;
