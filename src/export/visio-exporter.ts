@@ -1,11 +1,13 @@
 import type { Node } from "@xyflow/react";
-import type { FlowNodeData, LaneNodeData } from "../layout/flow-reactflow-types";
+import type { EdgeAnchorInfo, FlowNodeData, LaneNodeData } from "../layout/flow-reactflow-types";
 import {
+  ANCHOR_PERCENTS,
   LANE_HEADER_HEIGHT,
   LANE_PALETTE,
   LANE_WIDTH,
   NODE_HEIGHT_BY_TYPE,
   NODE_WIDTH_BY_TYPE,
+  SIDE_ANCHOR_OFFSETS,
 } from "../layout/swimlane-constants";
 import type { FlowExportContext } from "./flow-exporters";
 import { zipStore } from "./zip-store";
@@ -17,10 +19,11 @@ import { zipStore } from "./zip-store";
  * http://schemas.microsoft.com/office/visio/2012/main 名前空間のXMLで表す。
  * 座標系は左下原点・インチ単位(画面pxは96dpi換算)。
  *
- * v1の方針: レイアウトエンジンが確定した経路(routePath)を忠実に再現するため、
- * エッジは経路そのままのポリライン図形として出力する(矢印・破線・色は再現)。
- * ノードを動かすと線が追従する「動的コネクタ」化は、Dynamic Connectorマスターの
- * 埋め込みが必要なため将来拡張とする。
+ * エッジは1Dコネクタ図形として出力し、初期形状にはレイアウトエンジンが確定した
+ * 経路(routePath)をそのまま与える。両端はノードの接続点(画面と同じアンカー並び)へ
+ * Connect要素でグルーするため、Visio本体ではノード移動時にエッジが追従して
+ * 再ルーティングされる(移動後の経路はVisioのルーティングエンジンによる)。
+ * LibreOffice(libvisio)は数式・グルーを評価しないため静的表示のまま変わらない。
  */
 
 const VISIO_NS = "http://schemas.microsoft.com/office/visio/2012/main";
@@ -250,7 +253,6 @@ function getDiagramBounds(nodes: FlowExportContext["nodes"], edges: FlowExportCo
 }
 
 function buildPageXml({ model, nodes, edges }: FlowExportContext, bounds: DiagramBounds) {
-  const shapes: string[] = [];
   let shapeId = 0;
   const nextId = () => {
     shapeId += 1;
@@ -259,137 +261,256 @@ function buildPageXml({ model, nodes, edges }: FlowExportContext, bounds: Diagra
   const laneNodes = nodes.filter((node): node is Node<LaneNodeData> => node.data.kind === "lane");
   const flowNodes = nodes.filter((node): node is Node<FlowNodeData> => node.data.kind === "flow");
 
-  laneNodes.forEach((lane) => shapes.push(...buildLaneShapes(lane, bounds, nextId)));
-  edges.forEach((edge) => {
-    const shape = buildEdgeShape(edge, bounds, nextId);
-    if (shape) shapes.push(shape);
+  // ノードを先に構築してグルー先の図形IDを確定させる(描画順はエッジの上)
+  const nodeShapeIdByNodeId = new Map<string, number>();
+  const nodeXml: string[] = [];
+  flowNodes.forEach((node) => {
+    const built = buildNodeShapes(node, bounds, nextId);
+    nodeShapeIdByNodeId.set(node.id, built.anchorShapeId);
+    nodeXml.push(...built.xml);
   });
-  flowNodes.forEach((node) => shapes.push(...buildNodeShapes(node, bounds, nextId)));
-  edges.forEach((edge) => {
-    const label = buildEdgeLabelShape(edge, bounds, nextId);
-    if (label) shapes.push(label);
+
+  const laneXml = laneNodes.flatMap((lane) => buildLaneShapes(lane, bounds, nextId));
+  const connects: string[] = [];
+  const edgeXml = edges
+    .map((edge) => buildEdgeShape(edge, bounds, nextId, nodeShapeIdByNodeId, connects))
+    .filter((shape): shape is string => shape !== null);
+  const labelXml = edges
+    .map((edge) => buildEdgeLabelShape(edge, bounds, nextId))
+    .filter((shape): shape is string => shape !== null);
+  const footer = textShape(nextId(), bounds, {
+    x: bounds.x + 20,
+    y: bounds.y + bounds.height - 26,
+    width: 300,
+    height: 16,
+    text: model.flow_id,
+    fontPx: 11,
+    color: "#657784",
+    bold: false,
+    align: "left",
   });
-  shapes.push(
-    textShape(nextId(), bounds, {
-      x: bounds.x + 20,
-      y: bounds.y + bounds.height - 26,
-      width: 300,
-      height: 16,
-      text: model.flow_id,
-      fontPx: 11,
-      color: "#657784",
-      bold: false,
-      align: "left",
-    }),
-  );
 
   return [
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
     `<PageContents xmlns="${VISIO_NS}" xmlns:r="${REL_NS}" xml:space="preserve">`,
     "<Shapes>",
-    ...shapes,
+    ...laneXml,
+    ...edgeXml,
+    ...nodeXml,
+    ...labelXml,
+    footer,
     "</Shapes>",
+    connects.length ? `<Connects>${connects.join("")}</Connects>` : "",
     "</PageContents>",
   ].join("");
 }
 
-/** レーン背景・ヘッダー・タイトル(3〜4図形) */
+/**
+ * レーン一式(背景・ヘッダー・アクセント・タイトル)を1グループにまとめる。
+ * テキストは単一書式の子図形に分ける: libvisioは複数書式ラン(cp)の文字数を
+ * バイト数で誤計算するため、日本語では書式境界がずれる。
+ */
 function buildLaneShapes(lane: Node<LaneNodeData>, bounds: DiagramBounds, nextId: () => number) {
   const { lane: laneInfo, laneIndex, height, width = LANE_WIDTH } = lane.data;
   const color = LANE_PALETTE[laneIndex % LANE_PALETTE.length];
   const x = lane.position.x;
   const y = lane.position.y;
+  const groupId = nextId();
 
   return [
-    rectShape(nextId(), bounds, { x, y, width, height, fill: color.fill, lineColor: "#c8d4dc" }),
-    rectShape(nextId(), bounds, { x, y, width, height: LANE_HEADER_HEIGHT, fill: color.header, lineColor: "#c8d4dc" }),
-    rectShape(nextId(), bounds, { x, y, width: 5, height: LANE_HEADER_HEIGHT, fill: color.accent, lineColor: color.accent }),
-    textShape(nextId(), bounds, {
-      x: x + 14,
-      y: y + 8,
-      width: width - 28,
-      height: LANE_HEADER_HEIGHT - 16,
-      text: `${laneInfo.name}\n${laneInfo.id} / ${laneInfo.type}`,
-      runs: [
-        { fontPx: 14, color: "#22313f", bold: true },
-        { fontPx: 10, color: "#657784", bold: true },
-      ],
-      align: "left",
-    }),
+    [
+      `<Shape ID="${groupId}" NameU="lane ${escapeXml(laneInfo.id)}" Type="Group" LineStyle="0" FillStyle="0" TextStyle="0">`,
+      frameCells({ x, y, width, height }, bounds),
+      '<Cell N="LinePattern" V="0"/>',
+      '<Cell N="FillPattern" V="0"/>',
+      '<Cell N="DisplayMode" V="2"/>',
+      "<Shapes>",
+      childRectShape(nextId(), 0, 0, width, height, height, { fill: color.fill, lineColor: "#c8d4dc" }),
+      childRectShape(nextId(), 0, 0, width, LANE_HEADER_HEIGHT, height, { fill: color.header, lineColor: "#c8d4dc" }),
+      childRectShape(nextId(), 0, 0, 5, LANE_HEADER_HEIGHT, height, { fill: color.accent, lineColor: color.accent }),
+      childTextShape(nextId(), 14, 8, width - 28, 22, height, {
+        text: laneInfo.name,
+        fontPx: 14,
+        color: "#22313f",
+        bold: true,
+        align: "left",
+      }),
+      childTextShape(nextId(), 14, 32, width - 28, 18, height, {
+        text: `${laneInfo.id} / ${laneInfo.type}`,
+        fontPx: 10,
+        color: "#657784",
+        bold: true,
+        align: "left",
+      }),
+      "</Shapes>",
+      "</Shape>",
+    ].join(""),
   ];
 }
 
+/** ノード1個分の図形群と、エッジのグルー先になる図形IDを返す */
 function buildNodeShapes(node: Node<FlowNodeData>, bounds: DiagramBounds, nextId: () => number) {
   const flowNode = node.data.node;
   const width = NODE_WIDTH_BY_TYPE[flowNode.type];
   const height = NODE_HEIGHT_BY_TYPE[flowNode.type];
   const x = node.position.x;
   const y = node.position.y;
+  const connection = connectionSectionXml(width, height);
 
   if (flowNode.type === "decision") {
-    return [
-      diamondShape(nextId(), bounds, {
-        x,
-        y,
-        width,
-        height,
-        fill: "#fff3cf",
-        lineColor: "#c99d34",
-        text: flowNode.label,
-        fontPx: 12,
-        color: "#43340e",
-      }),
-    ];
+    const id = nextId();
+    return {
+      anchorShapeId: id,
+      xml: [
+        diamondShape(id, bounds, {
+          x,
+          y,
+          width,
+          height,
+          fill: "#fff3cf",
+          lineColor: "#c99d34",
+          text: flowNode.label,
+          fontPx: 12,
+          color: "#43340e",
+          extraSectionXml: connection,
+          objType: 1,
+        }),
+      ],
+    };
   }
 
   if (flowNode.type === "start" || flowNode.type === "end") {
     const fill = flowNode.type === "start" ? "#2f8f6f" : "#714d91";
-    return [
-      rectShape(nextId(), bounds, {
-        x,
-        y,
-        width,
-        height,
-        fill,
-        lineColor: fill,
-        roundingPx: height / 2,
-        text: flowNode.label,
-        fontPx: 14,
-        color: "#ffffff",
-        bold: true,
-      }),
-    ];
+    const id = nextId();
+    return {
+      anchorShapeId: id,
+      xml: [
+        rectShape(id, bounds, {
+          x,
+          y,
+          width,
+          height,
+          fill,
+          lineColor: fill,
+          roundingPx: height / 2,
+          text: flowNode.label,
+          fontPx: 14,
+          color: "#ffffff",
+          bold: true,
+          extraSectionXml: connection,
+          objType: 1,
+        }),
+      ],
+    };
   }
 
+  // process / document / system_process: 本体矩形・アクセントバー・テキストを
+  // 1グループにまとめて1オブジェクトで扱えるようにする。テキストは単一書式の
+  // 子図形に分ける(複数書式ランはlibvisioが日本語で誤描画するため)
   const accent = flowNode.type === "document" ? "#9d6d1f" : flowNode.type === "system_process" ? "#2f8f6f" : "#2f6f8f";
   const caption = `${node.data.laneName} / ${node.data.phaseName}`;
-  const body = flowNode.description ? `${flowNode.label}\n${flowNode.description}` : flowNode.label;
-  return [
-    rectShape(nextId(), bounds, { x, y, width, height, fill: "#ffffff", lineColor: "#bccbd4", roundingPx: 8 }),
-    rectShape(nextId(), bounds, { x, y, width: 5, height, fill: accent, lineColor: accent }),
-    textShape(nextId(), bounds, {
-      x: x + 12,
-      y: y + 6,
-      width: width - 20,
-      height: height - 12,
-      text: `${caption}\n${body}`,
-      runs: flowNode.description
-        ? [
-            { fontPx: 10, color: "#667b88", bold: true },
-            { fontPx: 13, color: "#17212b", bold: true },
-            { fontPx: 10, color: "#667784", bold: false },
-          ]
-        : [
-            { fontPx: 10, color: "#667b88", bold: true },
-            { fontPx: 13, color: "#17212b", bold: true },
-          ],
+  const groupId = nextId();
+  const xml = [
+    `<Shape ID="${groupId}" NameU="node ${escapeXml(flowNode.id)}" Type="Group" LineStyle="0" FillStyle="0" TextStyle="0">`,
+    frameCells({ x, y, width, height }, bounds),
+    '<Cell N="LinePattern" V="0"/>',
+    '<Cell N="FillPattern" V="0"/>',
+    '<Cell N="DisplayMode" V="2"/>',
+    '<Cell N="ObjType" V="1"/>',
+    connection,
+    "<Shapes>",
+    childRectShape(nextId(), 0, 0, width, height, height, { fill: "#ffffff", lineColor: "#bccbd4", roundingPx: 8 }),
+    childRectShape(nextId(), 0, 0, 5, height, height, { fill: accent, lineColor: accent }),
+    childTextShape(nextId(), 12, 4, width - 20, 16, height, {
+      text: caption,
+      fontPx: 10,
+      color: "#667b88",
+      bold: true,
       align: "left",
     }),
-  ];
+    childTextShape(nextId(), 12, 24, width - 20, flowNode.description ? 34 : height - 28, height, {
+      text: flowNode.label,
+      fontPx: 13,
+      color: "#17212b",
+      bold: true,
+      align: "left",
+      verticalAlign: 0,
+    }),
+    flowNode.description
+      ? childTextShape(nextId(), 12, 58, width - 20, height - 62, height, {
+          text: flowNode.description,
+          fontPx: 10,
+          color: "#667784",
+          bold: false,
+          align: "left",
+          verticalAlign: 0,
+        })
+      : "",
+    "</Shapes>",
+    "</Shape>",
+  ].join("");
+
+  return { anchorShapeId: groupId, xml: [xml] };
 }
 
-/** エッジ本体: routePathをそのまま辿るポリライン図形 */
-function buildEdgeShape(edge: FlowExportContext["edges"][number], bounds: DiagramBounds, nextId: () => number) {
+/** グループ内の子矩形(親ローカル座標) */
+function childRectShape(
+  id: number,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  parentHeightPx: number,
+  spec: { fill: string; lineColor: string; roundingPx?: number },
+) {
+  return [
+    `<Shape ID="${id}" Type="Shape" LineStyle="0" FillStyle="0" TextStyle="0">`,
+    childFrameCells(x, y, width, height, parentHeightPx),
+    `<Cell N="FillForegnd" V="${vc(spec.fill)}"/>`,
+    `<Cell N="LineColor" V="${vc(spec.lineColor)}"/>`,
+    '<Cell N="LineWeight" V="0.01041666666666667"/>',
+    spec.roundingPx ? `<Cell N="Rounding" V="${toIn(spec.roundingPx)}"/>` : "",
+    rectGeometryXml(),
+    "</Shape>",
+  ].join("");
+}
+
+/** グループ内の子テキスト(親ローカル座標・単一書式) */
+function childTextShape(
+  id: number,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  parentHeightPx: number,
+  content: TextContent & { align: "left" | "center" },
+) {
+  const textParts = textPartsXml(content);
+  return [
+    `<Shape ID="${id}" Type="Shape" LineStyle="0" FillStyle="0" TextStyle="0">`,
+    childFrameCells(x, y, width, height, parentHeightPx),
+    '<Cell N="FillPattern" V="0"/>',
+    '<Cell N="LinePattern" V="0"/>',
+    textParts.cells,
+    rectGeometryXml({ noShow: true }),
+    textParts.sections,
+    textParts.text,
+    "</Shape>",
+  ].join("");
+}
+
+/**
+ * エッジ本体: 1Dコネクタ図形。初期ジオメトリは画面の経路をそのまま持ち、
+ * 両端はノードの接続点へグルー(Connect要素+PAR(PNT)数式)する。
+ * Visioで開くとノード移動に追従する。libvisioは数式を無視し初期形状を描く。
+ */
+function buildEdgeShape(
+  edge: FlowExportContext["edges"][number],
+  bounds: DiagramBounds,
+  nextId: () => number,
+  nodeShapeIdByNodeId: Map<string, number>,
+  connects: string[],
+) {
   const data = edge.data;
   if (!data?.routePath?.length) return null;
   const points = compactPoints(data.routePath);
@@ -400,36 +521,62 @@ function buildEdgeShape(edge: FlowExportContext["edges"][number], bounds: Diagra
   const strokePx = edgeType === "rollback" || edgeType === "exception" ? 2.6 : 2;
   const dashed = edgeType === "rollback";
 
-  // バウンディングボックスを0.5pxずつ広げ、垂直/水平のみの経路でも幅・高さが0にならないようにする
-  const minX = Math.min(...points.map((point) => point.x)) - 0.5;
-  const maxX = Math.max(...points.map((point) => point.x)) + 0.5;
-  const minY = Math.min(...points.map((point) => point.y)) - 0.5;
-  const maxY = Math.max(...points.map((point) => point.y)) + 0.5;
-  const widthIn = toIn(maxX - minX);
-  const heightIn = toIn(maxY - minY);
-  const pin = pagePoint({ x: (minX + maxX) / 2, y: (minY + maxY) / 2 }, bounds);
+  const shapeId = nextId();
+  const begin = pagePoint(points[0], bounds);
+  const end = pagePoint(points[points.length - 1], bounds);
+  const widthIn = roundIn(end.x - begin.x);
+  const heightIn = roundIn(end.y - begin.y);
 
+  // ローカル座標(原点=始点)。Width/Heightは符号付きで終点が(Width,Height)になる
   const rows = points
     .map((point, index) => {
-      const localX = toIn(point.x - minX);
-      const localY = toIn(maxY - point.y);
+      const page = pagePoint(point, bounds);
       const type = index === 0 ? "MoveTo" : "LineTo";
-      return `<Row T="${type}" IX="${index + 1}"><Cell N="X" V="${localX}"/><Cell N="Y" V="${localY}"/></Row>`;
+      return `<Row T="${type}" IX="${index + 1}"><Cell N="X" V="${roundIn(page.x - begin.x)}"/><Cell N="Y" V="${roundIn(page.y - begin.y)}"/></Row>`;
     })
     .join("");
 
+  const sourceShapeId = nodeShapeIdByNodeId.get(edge.source);
+  const targetShapeId = nodeShapeIdByNodeId.get(edge.target);
+  const sourceSite = anchorSiteIndex(data.sourceAnchor, edge.sourceHandle, CONNECTION_SITE_BASE.bottom);
+  const targetSite = anchorSiteIndex(data.targetAnchor, edge.targetHandle, CONNECTION_SITE_BASE.top);
+  const beginGlue =
+    sourceShapeId !== undefined
+      ? ` F="PAR(PNT(Sheet.${sourceShapeId}!Connections.X${sourceSite + 1},Sheet.${sourceShapeId}!Connections.Y${sourceSite + 1}))"`
+      : "";
+  const endGlue =
+    targetShapeId !== undefined
+      ? ` F="PAR(PNT(Sheet.${targetShapeId}!Connections.X${targetSite + 1},Sheet.${targetShapeId}!Connections.Y${targetSite + 1}))"`
+      : "";
+  if (sourceShapeId !== undefined) {
+    connects.push(
+      `<Connect FromSheet="${shapeId}" FromCell="BeginX" FromPart="9" ToSheet="${sourceShapeId}" ToCell="Connections.X${sourceSite + 1}" ToPart="${100 + sourceSite}"/>`,
+    );
+  }
+  if (targetShapeId !== undefined) {
+    connects.push(
+      `<Connect FromSheet="${shapeId}" FromCell="EndX" FromPart="12" ToSheet="${targetShapeId}" ToCell="Connections.X${targetSite + 1}" ToPart="${100 + targetSite}"/>`,
+    );
+  }
+
   return [
-    `<Shape ID="${nextId()}" NameU="edge ${escapeXml(data.edge.id)}" Type="Shape" LineStyle="0" FillStyle="0" TextStyle="0">`,
-    `<Cell N="PinX" V="${pin.x}"/>`,
-    `<Cell N="PinY" V="${pin.y}"/>`,
-    `<Cell N="Width" V="${widthIn}"/>`,
-    `<Cell N="Height" V="${heightIn}"/>`,
-    `<Cell N="LocPinX" V="${div2(widthIn)}" F="Width*0.5"/>`,
-    `<Cell N="LocPinY" V="${div2(heightIn)}" F="Height*0.5"/>`,
-    '<Cell N="Angle" V="0"/>',
-    '<Cell N="FlipX" V="0"/>',
-    '<Cell N="FlipY" V="0"/>',
-    '<Cell N="ResizeMode" V="0"/>',
+    `<Shape ID="${shapeId}" NameU="edge ${escapeXml(data.edge.id)}" Type="Shape" LineStyle="0" FillStyle="0" TextStyle="0">`,
+    `<Cell N="BeginX" V="${begin.x}"${beginGlue}/>`,
+    `<Cell N="BeginY" V="${begin.y}"${beginGlue}/>`,
+    `<Cell N="EndX" V="${end.x}"${endGlue}/>`,
+    `<Cell N="EndY" V="${end.y}"${endGlue}/>`,
+    `<Cell N="PinX" V="${roundIn((begin.x + end.x) / 2)}" F="GUARD((BeginX+EndX)/2)"/>`,
+    `<Cell N="PinY" V="${roundIn((begin.y + end.y) / 2)}" F="GUARD((BeginY+EndY)/2)"/>`,
+    `<Cell N="Width" V="${widthIn}" F="GUARD(EndX-BeginX)"/>`,
+    `<Cell N="Height" V="${heightIn}" F="GUARD(EndY-BeginY)"/>`,
+    `<Cell N="LocPinX" V="${div2(widthIn)}" F="GUARD(Width*0.5)"/>`,
+    `<Cell N="LocPinY" V="${div2(heightIn)}" F="GUARD(Height*0.5)"/>`,
+    '<Cell N="Angle" V="0" F="GUARD(0)"/>',
+    sourceShapeId !== undefined ? `<Cell N="BegTrigger" V="2" F="_XFTRIGGER(Sheet.${sourceShapeId}!EventXFMod)"/>` : "",
+    targetShapeId !== undefined ? `<Cell N="EndTrigger" V="2" F="_XFTRIGGER(Sheet.${targetShapeId}!EventXFMod)"/>` : "",
+    '<Cell N="ObjType" V="2"/>',
+    '<Cell N="ShapeRouteStyle" V="16"/>',
+    '<Cell N="ConFixedCode" V="0"/>',
     `<Cell N="LineColor" V="${vc(color)}"/>`,
     `<Cell N="LineWeight" V="${toIn(strokePx)}"/>`,
     `<Cell N="LinePattern" V="${dashed ? 2 : 1}"/>`,
@@ -443,6 +590,41 @@ function buildEdgeShape(edge: FlowExportContext["edges"][number], bounds: Diagra
     "</Section>",
     "</Shape>",
   ].join("");
+}
+
+/**
+ * 接続点の並びは画面・Excel出力と同一に保つこと(仕様S5-2):
+ * 上(ANCHOR_PERCENTS順) → 下(同) → 左(SIDE_ANCHOR_OFFSETS順) → 右(同)。
+ */
+const CONNECTION_SITE_BASE: Record<EdgeAnchorInfo["side"], number> = {
+  top: 0,
+  bottom: ANCHOR_PERCENTS.length,
+  left: ANCHOR_PERCENTS.length * 2,
+  right: ANCHOR_PERCENTS.length * 2 + SIDE_ANCHOR_OFFSETS.length,
+};
+
+function anchorSiteIndex(anchor: EdgeAnchorInfo | undefined, handleId: string | null | undefined, fallback: number) {
+  if (anchor) {
+    const slotMax = (anchor.side === "top" || anchor.side === "bottom" ? ANCHOR_PERCENTS.length : SIDE_ANCHOR_OFFSETS.length) - 1;
+    return CONNECTION_SITE_BASE[anchor.side] + Math.min(Math.max(anchor.slot, 0), slotMax);
+  }
+  const side = handleId?.split("-")[1] as EdgeAnchorInfo["side"] | undefined;
+  return side && side in CONNECTION_SITE_BASE ? CONNECTION_SITE_BASE[side] : fallback;
+}
+
+/** ノード外周の接続点セクション(ローカル座標・Y上向き) */
+function connectionSectionXml(widthPx: number, heightPx: number) {
+  const rows: string[] = [];
+  const add = (xIn: number, yIn: number) => {
+    rows.push(
+      `<Row IX="${rows.length}"><Cell N="X" V="${xIn}"/><Cell N="Y" V="${yIn}"/><Cell N="DirX" V="0"/><Cell N="DirY" V="0"/><Cell N="Type" V="0"/><Cell N="AutoGen" V="0"/><Cell N="Prompt" V=""/></Row>`,
+    );
+  };
+  ANCHOR_PERCENTS.forEach((percent) => add(toIn(widthPx * percent), toIn(heightPx)));
+  ANCHOR_PERCENTS.forEach((percent) => add(toIn(widthPx * percent), 0));
+  SIDE_ANCHOR_OFFSETS.forEach((offset) => add(0, toIn(heightPx / 2 - offset)));
+  SIDE_ANCHOR_OFFSETS.forEach((offset) => add(toIn(widthPx), toIn(heightPx / 2 - offset)));
+  return `<Section N="Connection">${rows.join("")}</Section>`;
 }
 
 function buildEdgeLabelShape(edge: FlowExportContext["edges"][number], bounds: DiagramBounds, nextId: () => number) {
@@ -469,25 +651,59 @@ function buildEdgeLabelShape(edge: FlowExportContext["edges"][number], bounds: D
   });
 }
 
-type RectSpec = {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  fill: string;
-  lineColor: string;
-  roundingPx?: number;
-  text?: string;
+type TextRun = { fontPx: number; color: string; bold: boolean };
+
+type TextContent = {
+  text: string;
+  /**
+   * 改行区切りの各行に別書式を適用する場合に指定(行数と同数)。
+   * 注意: libvisioは書式ラン(cp)の文字数をバイト数で誤計算するため、
+   * 日本語テキストではLibreOfficeで書式境界がずれる。日本語を含む場合は
+   * 単一書式の子図形に分けること。
+   */
+  runs?: TextRun[];
   fontPx?: number;
   color?: string;
   bold?: boolean;
+  align?: "left" | "center";
+  /** 0=上揃え、1=中央(省略時はスタイル既定の中央) */
+  verticalAlign?: 0 | 1;
+  marginsPx?: { left?: number; top?: number; right?: number; bottom?: number };
 };
 
-function rectShape(id: number, bounds: DiagramBounds, spec: RectSpec) {
-  const geometry = [
+/** テキストのセル(整列・余白)、セクション(Character/Paragraph)、Text要素を組み立てる */
+function textPartsXml(content: TextContent | undefined) {
+  if (!content?.text) return { cells: "", sections: "", text: "" };
+  const lines = content.text.split("\n");
+  const runs = content.runs && content.runs.length === lines.length ? content.runs : null;
+  const characterRow = (run: TextRun, index: number) =>
+    `<Row IX="${index}"><Cell N="Font" V="${FONT_JA}"/><Cell N="Color" V="${vc(run.color)}"/><Cell N="Size" V="${fontSizeIn(run.fontPx)}"/><Cell N="Style" V="${run.bold ? 1 : 0}"/></Row>`;
+  const character = runs
+    ? `<Section N="Character">${runs.map(characterRow).join("")}</Section>`
+    : `<Section N="Character">${characterRow({ fontPx: content.fontPx ?? 12, color: content.color ?? "#17212b", bold: content.bold ?? false }, 0)}</Section>`;
+  const paragraph = content.align
+    ? `<Section N="Paragraph"><Row IX="0"><Cell N="HorzAlign" V="${content.align === "left" ? 0 : 1}"/></Row></Section>`
+    : "";
+  const margins = content.marginsPx;
+  const cells = [
+    content.verticalAlign !== undefined ? `<Cell N="VerticalAlign" V="${content.verticalAlign}"/>` : "",
+    margins?.left !== undefined ? `<Cell N="LeftMargin" V="${toIn(margins.left)}"/>` : "",
+    margins?.top !== undefined ? `<Cell N="TopMargin" V="${toIn(margins.top)}"/>` : "",
+    margins?.right !== undefined ? `<Cell N="RightMargin" V="${toIn(margins.right)}"/>` : "",
+    margins?.bottom !== undefined ? `<Cell N="BottomMargin" V="${toIn(margins.bottom)}"/>` : "",
+  ].join("");
+  const text = runs
+    ? `<Text>${lines.map((line, index) => `<cp IX="${index}"/>${escapeXml(line)}${index < lines.length - 1 ? "\n" : ""}`).join("")}</Text>`
+    : `<Text>${escapeXml(content.text)}</Text>`;
+  return { cells, sections: character + paragraph, text };
+}
+
+function rectGeometryXml(options?: { noLine?: boolean; noShow?: boolean }) {
+  return [
     '<Section N="Geometry" IX="0">',
-    '<Cell N="NoFill" V="0"/>',
-    '<Cell N="NoLine" V="0"/>',
+    `<Cell N="NoFill" V="${options?.noShow ? 1 : 0}"/>`,
+    `<Cell N="NoLine" V="${options?.noLine || options?.noShow ? 1 : 0}"/>`,
+    options?.noShow ? '<Cell N="NoShow" V="1"/>' : "",
     '<Row T="RelMoveTo" IX="1"><Cell N="X" V="0"/><Cell N="Y" V="0"/></Row>',
     '<Row T="RelLineTo" IX="2"><Cell N="X" V="1"/><Cell N="Y" V="0"/></Row>',
     '<Row T="RelLineTo" IX="3"><Cell N="X" V="1"/><Cell N="Y" V="1"/></Row>',
@@ -495,9 +711,23 @@ function rectShape(id: number, bounds: DiagramBounds, spec: RectSpec) {
     '<Row T="RelLineTo" IX="5"><Cell N="X" V="0"/><Cell N="Y" V="0"/></Row>',
     "</Section>",
   ].join("");
-  const character = spec.text
-    ? `<Section N="Character"><Row IX="0"><Cell N="Font" V="${FONT_JA}"/><Cell N="Color" V="${vc(spec.color ?? "#17212b")}"/><Cell N="Size" V="${fontSizeIn(spec.fontPx ?? 12)}"/><Cell N="Style" V="${spec.bold ? 1 : 0}"/></Row></Section>`
-    : "";
+}
+
+type RectSpec = Omit<TextContent, "text"> & {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  fill: string;
+  lineColor: string;
+  roundingPx?: number;
+  extraSectionXml?: string;
+  objType?: number;
+  text?: string;
+};
+
+function rectShape(id: number, bounds: DiagramBounds, spec: RectSpec) {
+  const textParts = textPartsXml(spec.text ? { ...spec, text: spec.text } : undefined);
 
   return [
     `<Shape ID="${id}" Type="Shape" LineStyle="0" FillStyle="0" TextStyle="0">`,
@@ -506,9 +736,12 @@ function rectShape(id: number, bounds: DiagramBounds, spec: RectSpec) {
     `<Cell N="LineColor" V="${vc(spec.lineColor)}"/>`,
     '<Cell N="LineWeight" V="0.01041666666666667"/>',
     spec.roundingPx ? `<Cell N="Rounding" V="${toIn(spec.roundingPx)}"/>` : "",
-    geometry,
-    character,
-    spec.text ? `<Text>${escapeXml(spec.text)}</Text>` : "",
+    spec.objType !== undefined ? `<Cell N="ObjType" V="${spec.objType}"/>` : "",
+    textParts.cells,
+    rectGeometryXml(),
+    spec.extraSectionXml ?? "",
+    textParts.sections,
+    textParts.text,
     "</Shape>",
   ].join("");
 }
@@ -527,7 +760,7 @@ function diamondShape(id: number, bounds: DiagramBounds, spec: DiamondSpec) {
     '<Row T="RelLineTo" IX="5"><Cell N="X" V="0.5"/><Cell N="Y" V="0"/></Row>',
     "</Section>",
   ].join("");
-  const character = `<Section N="Character"><Row IX="0"><Cell N="Font" V="${FONT_JA}"/><Cell N="Color" V="${vc(spec.color ?? "#43340e")}"/><Cell N="Size" V="${fontSizeIn(spec.fontPx ?? 12)}"/><Cell N="Style" V="1"/></Row></Section>`;
+  const textParts = textPartsXml(spec.text ? { ...spec, text: spec.text, bold: spec.bold ?? true, color: spec.color ?? "#43340e" } : undefined);
 
   return [
     `<Shape ID="${id}" Type="Shape" LineStyle="0" FillStyle="0" TextStyle="0">`,
@@ -535,69 +768,56 @@ function diamondShape(id: number, bounds: DiagramBounds, spec: DiamondSpec) {
     `<Cell N="FillForegnd" V="${vc(spec.fill)}"/>`,
     `<Cell N="LineColor" V="${vc(spec.lineColor)}"/>`,
     '<Cell N="LineWeight" V="0.01041666666666667"/>',
+    spec.objType !== undefined ? `<Cell N="ObjType" V="${spec.objType}"/>` : "",
+    textParts.cells,
     geometry,
-    character,
-    spec.text ? `<Text>${escapeXml(spec.text)}</Text>` : "",
+    spec.extraSectionXml ?? "",
+    textParts.sections,
+    textParts.text,
     "</Shape>",
   ].join("");
 }
 
-type TextRun = { fontPx: number; color: string; bold: boolean };
-
-type TextSpec = {
+type TextSpec = TextContent & {
   x: number;
   y: number;
   width: number;
   height: number;
-  text: string;
-  fontPx?: number;
-  color?: string;
-  bold?: boolean;
   align: "left" | "center";
   fill?: string;
-  /** 改行区切りの各行に別書式を適用する場合に指定(行数と同数) */
-  runs?: TextRun[];
 };
 
 function textShape(id: number, bounds: DiagramBounds, spec: TextSpec) {
-  const horzAlign = spec.align === "left" ? 0 : 1;
-  const lines = spec.text.split("\n");
-  const runs = spec.runs && spec.runs.length === lines.length ? spec.runs : null;
-  const character = runs
-    ? `<Section N="Character">${runs
-        .map(
-          (run, index) =>
-            `<Row IX="${index}"><Cell N="Font" V="${FONT_JA}"/><Cell N="Color" V="${vc(run.color)}"/><Cell N="Size" V="${fontSizeIn(run.fontPx)}"/><Cell N="Style" V="${run.bold ? 1 : 0}"/></Row>`,
-        )
-        .join("")}</Section>`
-    : `<Section N="Character"><Row IX="0"><Cell N="Font" V="${FONT_JA}"/><Cell N="Color" V="${vc(spec.color ?? "#17212b")}"/><Cell N="Size" V="${fontSizeIn(spec.fontPx ?? 12)}"/><Cell N="Style" V="${spec.bold ? 1 : 0}"/></Row></Section>`;
-  const text = runs
-    ? `<Text>${lines.map((line, index) => `<cp IX="${index}"/>${escapeXml(line)}${index < lines.length - 1 ? "\n" : ""}`).join("")}</Text>`
-    : `<Text>${escapeXml(spec.text)}</Text>`;
-  const geometry = spec.fill
-    ? [
-        '<Section N="Geometry" IX="0">',
-        '<Cell N="NoFill" V="0"/>',
-        '<Cell N="NoLine" V="1"/>',
-        '<Row T="RelMoveTo" IX="1"><Cell N="X" V="0"/><Cell N="Y" V="0"/></Row>',
-        '<Row T="RelLineTo" IX="2"><Cell N="X" V="1"/><Cell N="Y" V="0"/></Row>',
-        '<Row T="RelLineTo" IX="3"><Cell N="X" V="1"/><Cell N="Y" V="1"/></Row>',
-        '<Row T="RelLineTo" IX="4"><Cell N="X" V="0"/><Cell N="Y" V="1"/></Row>',
-        '<Row T="RelLineTo" IX="5"><Cell N="X" V="0"/><Cell N="Y" V="0"/></Row>',
-        "</Section>",
-      ].join("")
-    : '<Section N="Geometry" IX="0"><Cell N="NoFill" V="1"/><Cell N="NoLine" V="1"/><Cell N="NoShow" V="1"/><Row T="RelMoveTo" IX="1"><Cell N="X" V="0"/><Cell N="Y" V="0"/></Row><Row T="RelLineTo" IX="2"><Cell N="X" V="1"/><Cell N="Y" V="1"/></Row></Section>';
+  const textParts = textPartsXml(spec);
 
   return [
     `<Shape ID="${id}" Type="Shape" LineStyle="0" FillStyle="0" TextStyle="0">`,
     frameCells(spec, bounds),
     spec.fill ? `<Cell N="FillForegnd" V="${vc(spec.fill)}"/>` : '<Cell N="FillPattern" V="0"/>',
     '<Cell N="LinePattern" V="0"/>',
-    geometry,
-    character,
-    `<Section N="Paragraph"><Row IX="0"><Cell N="HorzAlign" V="${horzAlign}"/></Row></Section>`,
-    text,
+    textParts.cells,
+    spec.fill ? rectGeometryXml({ noLine: true }) : rectGeometryXml({ noShow: true }),
+    textParts.sections,
+    textParts.text,
     "</Shape>",
+  ].join("");
+}
+
+/** グループ内子図形のXFormセル(親ローカル座標、x/yは親の左上からのpxオフセット) */
+function childFrameCells(x: number, y: number, width: number, height: number, parentHeightPx: number) {
+  const widthIn = toIn(width);
+  const heightIn = toIn(height);
+  return [
+    `<Cell N="PinX" V="${toIn(x + width / 2)}"/>`,
+    `<Cell N="PinY" V="${toIn(parentHeightPx - (y + height / 2))}"/>`,
+    `<Cell N="Width" V="${widthIn}"/>`,
+    `<Cell N="Height" V="${heightIn}"/>`,
+    `<Cell N="LocPinX" V="${div2(widthIn)}" F="Width*0.5"/>`,
+    `<Cell N="LocPinY" V="${div2(heightIn)}" F="Height*0.5"/>`,
+    '<Cell N="Angle" V="0"/>',
+    '<Cell N="FlipX" V="0"/>',
+    '<Cell N="FlipY" V="0"/>',
+    '<Cell N="ResizeMode" V="0"/>',
   ].join("");
 }
 
