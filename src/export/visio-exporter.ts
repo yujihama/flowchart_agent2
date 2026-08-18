@@ -50,8 +50,10 @@ function buildVsdxFiles({ model, nodes, edges }: FlowExportContext) {
   files.set("_rels/.rels", packageRelsXml());
   files.set("docProps/core.xml", coreXml(model.title));
   files.set("docProps/app.xml", appXml());
+  files.set("docProps/custom.xml", customXml());
   files.set("visio/document.xml", documentXml());
   files.set("visio/_rels/document.xml.rels", documentRelsXml());
+  files.set("visio/windows.xml", windowsXml(bounds));
   files.set("visio/pages/pages.xml", pagesXml(bounds));
   files.set("visio/pages/_rels/pages.xml.rels", pagesRelsXml());
   files.set("visio/pages/page1.xml", page);
@@ -68,8 +70,10 @@ function contentTypesXml() {
     '<Override PartName="/visio/document.xml" ContentType="application/vnd.ms-visio.drawing.main+xml"/>',
     '<Override PartName="/visio/pages/pages.xml" ContentType="application/vnd.ms-visio.pages+xml"/>',
     '<Override PartName="/visio/pages/page1.xml" ContentType="application/vnd.ms-visio.page+xml"/>',
+    '<Override PartName="/visio/windows.xml" ContentType="application/vnd.ms-visio.windows+xml"/>',
     '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>',
     '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>',
+    '<Override PartName="/docProps/custom.xml" ContentType="application/vnd.openxmlformats-officedocument.custom-properties+xml"/>',
     "</Types>",
   ].join("");
 }
@@ -81,6 +85,7 @@ function packageRelsXml() {
     '<Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/document" Target="visio/document.xml"/>',
     '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>',
     '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>',
+    '<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties" Target="docProps/custom.xml"/>',
     "</Relationships>",
   ].join("");
 }
@@ -107,13 +112,56 @@ function appXml() {
   ].join("");
 }
 
+/** Visio外で生成したファイルのため、開いた時に全式の再計算を指示する(公式推奨) */
+function customXml() {
+  return [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">',
+    '<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="2" name="RecalcDocument"><vt:bool>true</vt:bool></property>',
+    "</Properties>",
+  ].join("");
+}
+
+function windowsXml(bounds: DiagramBounds) {
+  const centerX = div2(toIn(bounds.width));
+  const centerY = div2(toIn(bounds.height));
+  return [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    `<Windows xmlns="${VISIO_NS}" xmlns:r="${REL_NS}" ClientWidth="1600" ClientHeight="900" xml:space="preserve">`,
+    `<Window ID="0" WindowType="Drawing" WindowState="1073741824" ContainerType="Page" Page="0" ViewScale="0.5" ViewCenterX="${centerX}" ViewCenterY="${centerY}">`,
+    "<ShowRulers>1</ShowRulers>",
+    "<ShowGrid>1</ShowGrid>",
+    "<ShowPageBreaks>0</ShowPageBreaks>",
+    "<ShowGuides>1</ShowGuides>",
+    "<ShowConnectionPoints>0</ShowConnectionPoints>",
+    "<GlueSettings>9</GlueSettings>",
+    "<SnapSettings>65847</SnapSettings>",
+    "<SnapExtensions>34</SnapExtensions>",
+    "<SnapAngles/>",
+    "<DynamicGridEnabled>1</DynamicGridEnabled>",
+    "<TabSplitterPos>0.5</TabSplitterPos>",
+    "</Window>",
+    "</Windows>",
+  ].join("");
+}
+
 function documentXml() {
   return [
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
     `<VisioDocument xmlns="${VISIO_NS}" xmlns:r="${REL_NS}" xml:space="preserve">`,
-    '<DocumentSettings TopPage="0" DefaultTextStyle="0" DefaultLineStyle="0" DefaultFillStyle="0" DefaultGuideStyle="0"/>',
+    '<DocumentSettings TopPage="0" DefaultTextStyle="0" DefaultLineStyle="0" DefaultFillStyle="0" DefaultGuideStyle="0">',
+    "<GlueSettings>9</GlueSettings>",
+    "<SnapSettings>65847</SnapSettings>",
+    "<SnapExtensions>34</SnapExtensions>",
+    "<SnapAngles/>",
+    "<DynamicGridEnabled>1</DynamicGridEnabled>",
+    "<ProtectStyles>0</ProtectStyles>",
+    "<ProtectShapes>0</ProtectShapes>",
+    "<ProtectMasters>0</ProtectMasters>",
+    "<ProtectBkgnds>0</ProtectBkgnds>",
+    "</DocumentSettings>",
     "<StyleSheets>",
-    '<StyleSheet ID="0" NameU="No Style" Name="No Style">',
+    '<StyleSheet ID="0" NameU="No Style" IsCustomNameU="1" Name="No Style" IsCustomName="1">',
     '<Cell N="EnableLineProps" V="1"/>',
     '<Cell N="EnableFillProps" V="1"/>',
     '<Cell N="EnableTextProps" V="1"/>',
@@ -145,6 +193,7 @@ function documentRelsXml() {
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
     '<Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/pages" Target="pages/pages.xml"/>',
+    '<Relationship Id="rId2" Type="http://schemas.microsoft.com/visio/2010/relationships/windows" Target="windows.xml"/>',
     "</Relationships>",
   ].join("");
 }
@@ -377,7 +426,11 @@ function buildEdgeShape(edge: FlowExportContext["edges"][number], bounds: Diagra
     `<Cell N="Height" V="${heightIn}"/>`,
     `<Cell N="LocPinX" V="${div2(widthIn)}" F="Width*0.5"/>`,
     `<Cell N="LocPinY" V="${div2(heightIn)}" F="Height*0.5"/>`,
-    `<Cell N="LineColor" V="${color}"/>`,
+    '<Cell N="Angle" V="0"/>',
+    '<Cell N="FlipX" V="0"/>',
+    '<Cell N="FlipY" V="0"/>',
+    '<Cell N="ResizeMode" V="0"/>',
+    `<Cell N="LineColor" V="${vc(color)}"/>`,
     `<Cell N="LineWeight" V="${toIn(strokePx)}"/>`,
     `<Cell N="LinePattern" V="${dashed ? 2 : 1}"/>`,
     '<Cell N="EndArrow" V="4"/>',
@@ -443,14 +496,14 @@ function rectShape(id: number, bounds: DiagramBounds, spec: RectSpec) {
     "</Section>",
   ].join("");
   const character = spec.text
-    ? `<Section N="Character"><Row IX="0"><Cell N="Font" V="${FONT_JA}"/><Cell N="Color" V="${spec.color ?? "#17212b"}"/><Cell N="Size" V="${fontSizeIn(spec.fontPx ?? 12)}"/><Cell N="Style" V="${spec.bold ? 1 : 0}"/></Row></Section>`
+    ? `<Section N="Character"><Row IX="0"><Cell N="Font" V="${FONT_JA}"/><Cell N="Color" V="${vc(spec.color ?? "#17212b")}"/><Cell N="Size" V="${fontSizeIn(spec.fontPx ?? 12)}"/><Cell N="Style" V="${spec.bold ? 1 : 0}"/></Row></Section>`
     : "";
 
   return [
     `<Shape ID="${id}" Type="Shape" LineStyle="0" FillStyle="0" TextStyle="0">`,
     frameCells(spec, bounds),
-    `<Cell N="FillForegnd" V="${spec.fill}"/>`,
-    `<Cell N="LineColor" V="${spec.lineColor}"/>`,
+    `<Cell N="FillForegnd" V="${vc(spec.fill)}"/>`,
+    `<Cell N="LineColor" V="${vc(spec.lineColor)}"/>`,
     '<Cell N="LineWeight" V="0.01041666666666667"/>',
     spec.roundingPx ? `<Cell N="Rounding" V="${toIn(spec.roundingPx)}"/>` : "",
     geometry,
@@ -474,13 +527,13 @@ function diamondShape(id: number, bounds: DiagramBounds, spec: DiamondSpec) {
     '<Row T="RelLineTo" IX="5"><Cell N="X" V="0.5"/><Cell N="Y" V="0"/></Row>',
     "</Section>",
   ].join("");
-  const character = `<Section N="Character"><Row IX="0"><Cell N="Font" V="${FONT_JA}"/><Cell N="Color" V="${spec.color ?? "#43340e"}"/><Cell N="Size" V="${fontSizeIn(spec.fontPx ?? 12)}"/><Cell N="Style" V="1"/></Row></Section>`;
+  const character = `<Section N="Character"><Row IX="0"><Cell N="Font" V="${FONT_JA}"/><Cell N="Color" V="${vc(spec.color ?? "#43340e")}"/><Cell N="Size" V="${fontSizeIn(spec.fontPx ?? 12)}"/><Cell N="Style" V="1"/></Row></Section>`;
 
   return [
     `<Shape ID="${id}" Type="Shape" LineStyle="0" FillStyle="0" TextStyle="0">`,
     frameCells(spec, bounds),
-    `<Cell N="FillForegnd" V="${spec.fill}"/>`,
-    `<Cell N="LineColor" V="${spec.lineColor}"/>`,
+    `<Cell N="FillForegnd" V="${vc(spec.fill)}"/>`,
+    `<Cell N="LineColor" V="${vc(spec.lineColor)}"/>`,
     '<Cell N="LineWeight" V="0.01041666666666667"/>',
     geometry,
     character,
@@ -514,10 +567,10 @@ function textShape(id: number, bounds: DiagramBounds, spec: TextSpec) {
     ? `<Section N="Character">${runs
         .map(
           (run, index) =>
-            `<Row IX="${index}"><Cell N="Font" V="${FONT_JA}"/><Cell N="Color" V="${run.color}"/><Cell N="Size" V="${fontSizeIn(run.fontPx)}"/><Cell N="Style" V="${run.bold ? 1 : 0}"/></Row>`,
+            `<Row IX="${index}"><Cell N="Font" V="${FONT_JA}"/><Cell N="Color" V="${vc(run.color)}"/><Cell N="Size" V="${fontSizeIn(run.fontPx)}"/><Cell N="Style" V="${run.bold ? 1 : 0}"/></Row>`,
         )
         .join("")}</Section>`
-    : `<Section N="Character"><Row IX="0"><Cell N="Font" V="${FONT_JA}"/><Cell N="Color" V="${spec.color ?? "#17212b"}"/><Cell N="Size" V="${fontSizeIn(spec.fontPx ?? 12)}"/><Cell N="Style" V="${spec.bold ? 1 : 0}"/></Row></Section>`;
+    : `<Section N="Character"><Row IX="0"><Cell N="Font" V="${FONT_JA}"/><Cell N="Color" V="${vc(spec.color ?? "#17212b")}"/><Cell N="Size" V="${fontSizeIn(spec.fontPx ?? 12)}"/><Cell N="Style" V="${spec.bold ? 1 : 0}"/></Row></Section>`;
   const text = runs
     ? `<Text>${lines.map((line, index) => `<cp IX="${index}"/>${escapeXml(line)}${index < lines.length - 1 ? "\n" : ""}`).join("")}</Text>`
     : `<Text>${escapeXml(spec.text)}</Text>`;
@@ -538,7 +591,7 @@ function textShape(id: number, bounds: DiagramBounds, spec: TextSpec) {
   return [
     `<Shape ID="${id}" Type="Shape" LineStyle="0" FillStyle="0" TextStyle="0">`,
     frameCells(spec, bounds),
-    spec.fill ? `<Cell N="FillForegnd" V="${spec.fill}"/>` : '<Cell N="FillPattern" V="0"/>',
+    spec.fill ? `<Cell N="FillForegnd" V="${vc(spec.fill)}"/>` : '<Cell N="FillPattern" V="0"/>',
     '<Cell N="LinePattern" V="0"/>',
     geometry,
     character,
@@ -560,6 +613,10 @@ function frameCells(spec: { x: number; y: number; width: number; height: number 
     `<Cell N="Height" V="${heightIn}"/>`,
     `<Cell N="LocPinX" V="${div2(widthIn)}" F="Width*0.5"/>`,
     `<Cell N="LocPinY" V="${div2(heightIn)}" F="Height*0.5"/>`,
+    '<Cell N="Angle" V="0"/>',
+    '<Cell N="FlipX" V="0"/>',
+    '<Cell N="FlipY" V="0"/>',
+    '<Cell N="ResizeMode" V="0"/>',
   ].join("");
 }
 
@@ -601,6 +658,10 @@ function compactPoints(points: Point[]) {
     const previous = points[index - 1];
     return !previous || previous.x !== point.x || previous.y !== point.y;
   });
+}
+
+function vc(hex: string) {
+  return hex.toUpperCase();
 }
 
 function escapeXml(value: string) {
