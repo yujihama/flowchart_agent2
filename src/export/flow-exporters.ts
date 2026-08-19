@@ -9,13 +9,14 @@ import {
   NODE_WIDTH_BY_TYPE,
   SIDE_ANCHOR_OFFSETS,
 } from "../layout/swimlane-constants";
+import { createOdgBlob } from "./odg-exporter";
 import { createVsdxBlob } from "./visio-exporter";
 import { zipStore } from "./zip-store";
 
 type ExportNode = Node<FlowNodeData | LaneNodeData>;
 type ExportEdge = Edge<FlowEdgeData>;
 
-export type FlowExportFormatId = "png" | "svg" | "xlsx" | "vsdx";
+export type FlowExportFormatId = "png" | "svg" | "xlsx" | "vsdx" | "odg";
 
 export type FlowExportContext = {
   model: FlowModel;
@@ -59,6 +60,13 @@ export const FLOW_EXPORT_FORMATS: FlowExportFormat[] = [
     extension: "vsdx",
     mimeType: "application/vnd.ms-visio.drawing",
     buildBlob: async (context) => createVsdxBlob(context),
+  },
+  {
+    id: "odg",
+    label: "ODG",
+    extension: "odg",
+    mimeType: "application/vnd.oasis.opendocument.graphics",
+    buildBlob: async (context) => createOdgBlob(context),
   },
 ];
 
