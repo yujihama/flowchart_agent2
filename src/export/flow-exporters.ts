@@ -9,13 +9,16 @@ import {
   NODE_WIDTH_BY_TYPE,
   SIDE_ANCHOR_OFFSETS,
 } from "../layout/swimlane-constants";
+import { createOdgBlob } from "./odg-exporter";
+import { createVsdxBlob } from "./visio-exporter";
+import { zipStore } from "./zip-store";
 
 type ExportNode = Node<FlowNodeData | LaneNodeData>;
 type ExportEdge = Edge<FlowEdgeData>;
 
-export type FlowExportFormatId = "png" | "svg" | "xlsx";
+export type FlowExportFormatId = "png" | "svg" | "xlsx" | "vsdx" | "odg";
 
-type FlowExportContext = {
+export type FlowExportContext = {
   model: FlowModel;
   nodes: ExportNode[];
   edges: ExportEdge[];
@@ -50,6 +53,20 @@ export const FLOW_EXPORT_FORMATS: FlowExportFormat[] = [
     extension: "xlsx",
     mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     buildBlob: async (context) => createXlsxBlob(context),
+  },
+  {
+    id: "vsdx",
+    label: "VSDX",
+    extension: "vsdx",
+    mimeType: "application/vnd.ms-visio.drawing",
+    buildBlob: async (context) => createVsdxBlob(context),
+  },
+  {
+    id: "odg",
+    label: "ODG",
+    extension: "odg",
+    mimeType: "application/vnd.oasis.opendocument.graphics",
+    buildBlob: async (context) => createOdgBlob(context),
   },
 ];
 
@@ -189,7 +206,8 @@ function getExportBounds(nodes: ExportNode[], edges: ExportEdge[]) {
 }
 
 function marker(id: string, color: string) {
-  return `<marker id="${id}" markerWidth="12" markerHeight="12" viewBox="0 0 12 12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth"><path d="M 2 2 L 10 6 L 2 10 z" fill="${color}"/></marker>`;
+  // 線幅に依存しない固定サイズ(userSpaceOnUse)にして、太線のrollbackでも矢印を同じ大きさに保つ
+  return `<marker id="${id}" markerWidth="13" markerHeight="13" viewBox="0 0 12 12" refX="10" refY="6" orient="auto" markerUnits="userSpaceOnUse"><path d="M 2 2 L 10 6 L 2 10 z" fill="${color}"/></marker>`;
 }
 
 function svgToPngBlob(svg: string): Promise<Blob> {
@@ -993,107 +1011,6 @@ function coreXml(model: FlowModel) {
     `<dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified>`,
     "</cp:coreProperties>",
   ].join("");
-}
-
-function zipStore(files: Map<string, string | Uint8Array>) {
-  const encoder = new TextEncoder();
-  const chunks: Uint8Array[] = [];
-  const centralDirectory: Uint8Array[] = [];
-  let offset = 0;
-
-  files.forEach((content, path) => {
-    const nameBytes = encoder.encode(path);
-    const dataBytes = typeof content === "string" ? encoder.encode(content) : content;
-    const crc = crc32(dataBytes);
-    const localHeader = concatBytes([
-      uint32le(0x04034b50),
-      uint16le(20),
-      uint16le(0x0800),
-      uint16le(0),
-      uint16le(0),
-      uint16le(0),
-      uint32le(crc),
-      uint32le(dataBytes.length),
-      uint32le(dataBytes.length),
-      uint16le(nameBytes.length),
-      uint16le(0),
-      nameBytes,
-    ]);
-    chunks.push(localHeader, dataBytes);
-
-    centralDirectory.push(
-      concatBytes([
-        uint32le(0x02014b50),
-        uint16le(20),
-        uint16le(20),
-        uint16le(0x0800),
-        uint16le(0),
-        uint16le(0),
-        uint16le(0),
-        uint32le(crc),
-        uint32le(dataBytes.length),
-        uint32le(dataBytes.length),
-        uint16le(nameBytes.length),
-        uint16le(0),
-        uint16le(0),
-        uint16le(0),
-        uint16le(0),
-        uint32le(0),
-        uint32le(offset),
-        nameBytes,
-      ]),
-    );
-    offset += localHeader.length + dataBytes.length;
-  });
-
-  const centralDirectoryOffset = offset;
-  const centralDirectoryBytes = concatBytes(centralDirectory);
-  const end = concatBytes([
-    uint32le(0x06054b50),
-    uint16le(0),
-    uint16le(0),
-    uint16le(files.size),
-    uint16le(files.size),
-    uint32le(centralDirectoryBytes.length),
-    uint32le(centralDirectoryOffset),
-    uint16le(0),
-  ]);
-
-  return concatBytes([...chunks, centralDirectoryBytes, end]);
-}
-
-function crc32(bytes: Uint8Array) {
-  let crc = 0xffffffff;
-  bytes.forEach((byte) => {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) {
-      crc = crc & 1 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1;
-    }
-  });
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-function uint16le(value: number) {
-  const bytes = new Uint8Array(2);
-  new DataView(bytes.buffer).setUint16(0, value, true);
-  return bytes;
-}
-
-function uint32le(value: number) {
-  const bytes = new Uint8Array(4);
-  new DataView(bytes.buffer).setUint32(0, value, true);
-  return bytes;
-}
-
-function concatBytes(parts: Uint8Array[]) {
-  const totalLength = parts.reduce((sum, part) => sum + part.length, 0);
-  const output = new Uint8Array(totalLength);
-  let offset = 0;
-  parts.forEach((part) => {
-    output.set(part, offset);
-    offset += part.length;
-  });
-  return output;
 }
 
 function columnName(index: number) {
